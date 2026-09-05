@@ -21,6 +21,7 @@ jobs:
         shell: pwsh
         run: |
           [scriptblock]::Create((Get-Content 'windows/Configure-AD.ps1' -Raw)) | Out-Null
+          [scriptblock]::Create((Get-Content 'windows/Run-Lab.ps1' -Raw)) | Out-Null
           [scriptblock]::Create((Get-Content 'windows/Seed-Assessment-Lab.ps1' -Raw)) | Out-Null
           Write-Host 'PowerShell syntax parsed successfully'
 
@@ -32,39 +33,55 @@ jobs:
           print('Autounattend XML is well formed')
           PY
 
-      - name: Validate post-setup AD bootstrap architecture
+      - name: Validate post-setup orchestration
         run: |
           test -f windows/Configure-AD.ps1
+          test -f windows/Run-Lab.ps1
+          test -f windows/Seed-Assessment-Lab.ps1
           test -f windows/SetupComplete.cmd
           grep -q 'Install-ADDSForest' windows/Configure-AD.ps1
-          grep -q 'Wait-WindowsSetupComplete' windows/Configure-AD.ps1
-          ! grep -q 'Microsoft-Windows-Deployment' templates/Autounattend.xml.template
-          ! grep -q '<RunSynchronous>' templates/Autounattend.xml.template
-          ! grep -q 'Kali-AD-Lab-ConfigureAD' templates/Autounattend.xml.template
-          ! grep -q '<AutoLogon>' templates/Autounattend.xml.template
-          ! grep -q 'FirstLogonCommands' templates/Autounattend.xml.template
-          grep -q "AddMinutes(3)" windows/SetupComplete.cmd
-          grep -q "PT2M" windows/SetupComplete.cmd
-          grep -q "Register-ScheduledTask" windows/SetupComplete.cmd
+          grep -q 'Kali-AD-Lab-Orchestrator' windows/SetupComplete.cmd
+          grep -q 'Run-Lab.ps1' windows/SetupComplete.cmd
+          grep -q 'Seed-Assessment-Lab.ps1' windows/SetupComplete.cmd
+          grep -q 'AddMinutes(3)' windows/SetupComplete.cmd
+          grep -q 'PT2M' windows/SetupComplete.cmd
+          grep -q 'Register-ScheduledTask' windows/SetupComplete.cmd
           ! grep -q 'schtasks /Run' windows/SetupComplete.cmd
           ! grep -q 'shutdown.exe' windows/SetupComplete.cmd
+          ! grep -q 'Microsoft-Windows-Deployment' templates/Autounattend.xml.template
+          ! grep -q '<RunSynchronous>' templates/Autounattend.xml.template
+          ! grep -q '<AutoLogon>' templates/Autounattend.xml.template
+          ! grep -q 'FirstLogonCommands' templates/Autounattend.xml.template
+
+      - name: Validate assessment dataset and completion proof
+        run: |
+          grep -q 'Synthetic users: 24' windows/Seed-Assessment-Lab.ps1
+          grep -q 'Synthetic computers: 10' windows/Seed-Assessment-Lab.ps1
+          grep -q 'ADL-047' windows/Seed-Assessment-Lab.ps1
+          grep -q 'DCSync' windows/Seed-Assessment-Lab.ps1
+          grep -q 'LDAPServerIntegrity' windows/Seed-Assessment-Lab.ps1
+          grep -q 'LdapEnforceChannelBinding' windows/Seed-Assessment-Lab.ps1
+          grep -q 'MachineAccountQuota' windows/Seed-Assessment-Lab.ps1
+          grep -q 'AdminSDHolder' windows/Seed-Assessment-Lab.ps1
+          grep -q 'TransferAnyServer' windows/Seed-Assessment-Lab.ps1
+          grep -q 'assessment-ready' windows/Seed-Assessment-Lab.ps1
+          grep -q '24 users' windows/Run-Lab.ps1
+          grep -q '10 computers' windows/Run-Lab.ps1
+          grep -q 'assessment_ready' kali-ad-lab
+          grep -q 'Scenario families: 47 SEEDED' kali-ad-lab
+
+      - name: Validate automatic SPICE clipboard integration
+        run: |
+          grep -q 'spice-guest-tools-latest.exe' kali-ad-lab
+          grep -q 'spice-guest-tools-latest.exe /S' windows/SetupComplete.cmd
+          grep -q -- '--channel spicevmc' kali-ad-lab
+          grep -q 'com.redhat.spice.0' kali-ad-lab
+
+      - name: Validate legacy stages are removed
+        run: |
           ! test -e setup.sh
           ! test -e windows/Stage1.ps1
           ! test -e windows/Stage2.ps1
           ! test -e windows/Stage3.ps1
           ! grep -R -E 'Stage1\.ps1|Stage2\.ps1|Stage3\.ps1' -n kali-ad-lab windows templates
           ! grep -R 'LABTOOLS' -n windows templates
-
-      - name: Validate assessment-demo coverage
-        run: |
-          test -f docs/ASSESSMENT-DEMO.md
-          test -f windows/Seed-Assessment-Lab.ps1
-          grep -q 'Invoke-AssessmentDemo' windows/Configure-AD.ps1
-          grep -q 'ADL-047' windows/Configure-AD.ps1
-          grep -q 'DCSync' windows/Configure-AD.ps1
-          grep -q 'LDAPServerIntegrity' windows/Configure-AD.ps1
-          grep -q 'LdapEnforceChannelBinding' windows/Configure-AD.ps1
-          grep -q 'MachineAccountQuota' windows/Configure-AD.ps1
-          grep -q 'AdminSDHolder' windows/Configure-AD.ps1
-          grep -q 'TransferAnyServer' windows/Configure-AD.ps1
-          grep -q 'Security Assessment Demo' docs/ASSESSMENT-DEMO.md
