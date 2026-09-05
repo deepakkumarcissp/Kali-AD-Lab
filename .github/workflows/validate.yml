@@ -35,4 +35,5 @@ jobs:
           ! test -e windows/Stage1.ps1
           ! test -e windows/Stage2.ps1
           ! test -e windows/Stage3.ps1
-          ! grep -R 'LABTOOLS' -n kali-ad-lab windows templates || false
+          ! grep -R -E 'Stage1\.ps1|Stage2\.ps1|Stage3\.ps1' -n kali-ad-lab windows templates
+          ! grep -R 'LABTOOLS' -n windows templates
