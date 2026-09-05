@@ -25,16 +25,18 @@ jobs:
           print('Autounattend XML is well formed')
           PY
 
-      - name: Validate consolidated architecture
+      - name: Validate post-OOBE AD architecture
         run: |
           test -f windows/Configure-AD.ps1
           test -f windows/SetupComplete.cmd
           grep -q 'Install-ADDSForest' windows/Configure-AD.ps1
           grep -q 'Wait-WindowsSetupComplete' windows/Configure-AD.ps1
-          grep -q 'Microsoft-Windows-Deployment' templates/Autounattend.xml.template
-          grep -q 'Kali-AD-Lab-ConfigureAD' templates/Autounattend.xml.template
-          grep -q 'Start-ScheduledTask' templates/Autounattend.xml.template
           grep -q 'Kali-AD-Lab-ConfigureAD' windows/SetupComplete.cmd
+          grep -q 'FirstLogonCommands' templates/Autounattend.xml.template
+          grep -q '<AutoLogon>' templates/Autounattend.xml.template
+          grep -q 'SetupComplete.cmd' templates/Autounattend.xml.template
+          ! grep -q 'Microsoft-Windows-Deployment' templates/Autounattend.xml.template
+          ! grep -q '<RunSynchronous>' templates/Autounattend.xml.template
           ! test -e setup.sh
           ! test -e windows/Stage1.ps1
           ! test -e windows/Stage2.ps1
