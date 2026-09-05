@@ -5,6 +5,7 @@ New-Item -ItemType Directory -Path 'C:\ADLab\Logs' -Force | Out-Null
 Start-Transcript -Path 'C:\ADLab\Logs\Stage1.log' -Append
 
 try {
+    Unregister-ScheduledTask -TaskName 'Kali-AD-Lab-Stage1' -Confirm:$false -ErrorAction SilentlyContinue
     . 'C:\ADLab\config.ps1'
 
     Write-Host '[Stage1] Detecting primary network adapter...'
