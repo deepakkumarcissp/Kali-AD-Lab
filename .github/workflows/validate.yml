@@ -65,8 +65,8 @@ jobs:
           grep -q 'AdminSDHolder' windows/Seed-Assessment-Lab.ps1
           grep -q 'TransferAnyServer' windows/Seed-Assessment-Lab.ps1
           grep -q 'assessment-ready' windows/Seed-Assessment-Lab.ps1
-          grep -q '24 users' windows/Run-Lab.ps1
-          grep -q '10 computers' windows/Run-Lab.ps1
+          grep -q 'Synthetic users verified: 24' windows/Run-Lab.ps1
+          grep -q 'Synthetic computers verified: 10' windows/Run-Lab.ps1
           grep -q 'assessment_ready' kali-ad-lab
           grep -q 'Scenario families: 47 SEEDED' kali-ad-lab
 
