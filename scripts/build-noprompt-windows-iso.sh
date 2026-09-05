@@ -3,6 +3,9 @@ set -Eeuo pipefail
 
 SOURCE_ISO="${1:?source Windows ISO required}"
 OUTPUT_ISO="${2:?output ISO required}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+MEDIA_LABEL='WS25_ADLAB_V2'
 
 log(){ printf '[Kali-AD-Lab] %s\n' "$*"; }
 die(){ printf '[Kali-AD-Lab] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -11,6 +14,14 @@ die(){ printf '[Kali-AD-Lab] ERROR: %s\n' "$*" >&2; exit 1; }
 [[ -f "$SOURCE_ISO" ]] || die "Source ISO not found: ${SOURCE_ISO}"
 command -v xorriso >/dev/null 2>&1 || die 'xorriso is required.'
 
+for f in \
+  "$REPO_DIR/windows/SetupComplete.cmd" \
+  "$REPO_DIR/windows/Stage1.ps1" \
+  "$REPO_DIR/windows/Stage2.ps1" \
+  "$REPO_DIR/windows/Stage3.ps1"; do
+  [[ -f "$f" ]] || die "Required bootstrap file is missing: $f"
+done
+
 validate_iso(){
   local f="$1" s
   [[ -s "$f" ]] || return 1
@@ -18,11 +29,6 @@ validate_iso(){
   (( s > 3000000000 )) || return 1
   xorriso -indev "$f" -toc >/dev/null 2>&1
 }
-
-if validate_iso "$OUTPUT_ISO" && [[ "$OUTPUT_ISO" -nt "$SOURCE_ISO" ]]; then
-  log "Using cached no-prompt Windows ISO: ${OUTPUT_ISO}"
-  exit 0
-fi
 
 WORK_DIR="$(mktemp -d /var/tmp/kali-adlab-noprompt.XXXXXX)"
 MOUNT_DIR="$WORK_DIR/mnt"
@@ -43,11 +49,18 @@ mount -o loop,ro "$SOURCE_ISO" "$MOUNT_DIR"
 [[ -f "$MOUNT_DIR/boot/etfsboot.com" ]] || die 'Windows ISO is missing boot/etfsboot.com.'
 [[ -f "$MOUNT_DIR/efi/microsoft/boot/efisys_noprompt.bin" ]] || die 'Windows ISO is missing efi/microsoft/boot/efisys_noprompt.bin.'
 
-# Copy the Microsoft media unchanged, then rebuild only the El Torito boot
-# catalog so UEFI uses Microsoft's own efisys_noprompt.bin. This removes the
-# "Press any key to boot from CD or DVD" gate without third-party boot files.
 cp -a "$MOUNT_DIR/." "$TREE_DIR/"
 umount "$MOUNT_DIR"
+
+# Use the supported Windows $OEM$ mechanism for static bootstrap files. This
+# avoids executing fragile media-discovery logic during the specialize pass.
+OEM_DIR="$TREE_DIR/sources/\$OEM\$"
+mkdir -p "$OEM_DIR/\$1/ADLab" "$OEM_DIR/\$\$/Setup/Scripts"
+cp "$REPO_DIR/windows/Stage1.ps1" "$OEM_DIR/\$1/ADLab/Stage1.ps1"
+cp "$REPO_DIR/windows/Stage2.ps1" "$OEM_DIR/\$1/ADLab/Stage2.ps1"
+cp "$REPO_DIR/windows/Stage3.ps1" "$OEM_DIR/\$1/ADLab/Stage3.ps1"
+cp "$REPO_DIR/windows/SetupComplete.cmd" "$OEM_DIR/\$\$/Setup/Scripts/SetupComplete.cmd"
+printf '%s\n' "$MEDIA_LABEL" > "$OEM_DIR/\$1/ADLab/media-version.txt"
 
 mkdir -p "$(dirname "$OUTPUT_ISO")"
 rm -f "$TMP_ISO"
@@ -55,7 +68,7 @@ rm -f "$TMP_ISO"
 xorriso -as mkisofs \
   -iso-level 3 \
   -J -joliet-long -R \
-  -V 'WS2025_NOPROMPT' \
+  -V "$MEDIA_LABEL" \
   -b boot/etfsboot.com \
   -no-emul-boot -boot-load-size 8 -boot-info-table \
   -eltorito-alt-boot \
@@ -64,7 +77,7 @@ xorriso -as mkisofs \
   -o "$TMP_ISO" \
   "$TREE_DIR"
 
-validate_iso "$TMP_ISO" || die 'Generated no-prompt Windows ISO failed validation.'
+validate_iso "$TMP_ISO" || die 'Generated unattended Windows ISO failed validation.'
 mv -f "$TMP_ISO" "$OUTPUT_ISO"
 chmod 644 "$OUTPUT_ISO"
-log "No-prompt Windows ISO ready: ${OUTPUT_ISO}"
+log "Unattended Windows ISO ready: ${OUTPUT_ISO}"
