@@ -52,7 +52,8 @@ chmod +x \
   "$INSTALL_DIR/setup.sh" \
   "$INSTALL_DIR/kali-ad-lab" \
   "$INSTALL_DIR/scripts/build-noprompt-windows-iso.sh" \
-  "$INSTALL_DIR/scripts/prepare-windows-media.sh"
+  "$INSTALL_DIR/scripts/prepare-windows-media.sh" \
+  "$INSTALL_DIR/scripts/set-next-boot-disk.sh"
 ln -sf "$INSTALL_DIR/kali-ad-lab" /usr/local/bin/kali-ad-lab 2>/dev/null || true
 
 # Prepare the final unattended Windows ISO before setup.sh creates the VM.
@@ -80,6 +81,12 @@ DC_IP="$(awk -F': ' '/^DC IP: /{v=$2} END{print v}' "$RUN_LOG")"
   warn 'VM creation finished, but readiness details could not be parsed. The deployment output above contains the generated values.'
   exit 0
 }
+
+# The first boot is intentionally from the no-prompt Windows installer. Change
+# only the persistent boot order immediately afterward so Windows Setup can
+# reboot from the virtual hard disk without re-entering the installer ISO.
+log 'Setting subsequent Windows reboots to the virtual hard disk...'
+bash "$INSTALL_DIR/scripts/set-next-boot-disk.sh" "$VM_NAME"
 
 log "Windows installation is running inside ${VM_NAME}."
 log "Automatic AD readiness check started for ${DC_IP}."
