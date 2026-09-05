@@ -31,7 +31,9 @@ validate_iso(){
 }
 
 volume_id(){
-  xorriso -indev "$1" -pvd_info 2>/dev/null | awk -F"'" '/Volume id/ {print $2; exit}'
+  # xorriso emits PVD information on stderr, so merge stderr into stdout
+  # before parsing the quoted Volume id value.
+  xorriso -indev "$1" -pvd_info 2>&1 | awk -F"'" '/Volume id/ {print $2; exit}'
 }
 
 # Migrate an older cached Microsoft ISO into the source-cache location.
