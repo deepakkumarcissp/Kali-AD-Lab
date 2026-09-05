@@ -4,6 +4,8 @@ set -Eeuo pipefail
 REPO_URL="https://github.com/deepakkumarcissp/Kali-AD-Lab.git"
 DEFAULT_INSTALL_DIR="/opt/Kali-AD-Lab"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE_WINDOWS_ISO="/var/lib/libvirt/boot/Kali-AD-Lab/Windows_Server_2025_Evaluation_x64.iso"
+NOPROMPT_WINDOWS_ISO="/var/lib/libvirt/boot/Kali-AD-Lab/Windows_Server_2025_Evaluation_x64_noprompt.iso"
 
 log(){ printf '[Kali-AD-Lab] %s\n' "$*"; }
 warn(){ printf '[Kali-AD-Lab] WARNING: %s\n' "$*" >&2; }
@@ -25,8 +27,6 @@ if [[ -d "${SCRIPT_DIR}/.git" ]]; then
   INSTALL_DIR="$SCRIPT_DIR"
   log "Using current repository checkout: ${INSTALL_DIR}"
 
-  # Best-effort update. A private repo may require user-specific credentials
-  # that are not available to root, so failure here must not block the lab.
   if git -C "$INSTALL_DIR" fetch origin main >/dev/null 2>&1; then
     git -C "$INSTALL_DIR" reset --hard origin/main >/dev/null
     log 'Repository updated to origin/main.'
@@ -50,7 +50,10 @@ else
   fi
 fi
 
-chmod +x "$INSTALL_DIR/setup.sh" "$INSTALL_DIR/kali-ad-lab" "$INSTALL_DIR/scripts/auto-boot-windows.sh"
+chmod +x \
+  "$INSTALL_DIR/setup.sh" \
+  "$INSTALL_DIR/kali-ad-lab" \
+  "$INSTALL_DIR/scripts/build-noprompt-windows-iso.sh"
 ln -sf "$INSTALL_DIR/kali-ad-lab" /usr/local/bin/kali-ad-lab 2>/dev/null || true
 
 RUN_LOG="$(mktemp /tmp/kali-ad-lab-run.XXXXXX.log)"
@@ -74,12 +77,25 @@ DC_IP="$(awk -F': ' '/^DC IP: /{v=$2} END{print v}' "$RUN_LOG")"
   exit 0
 }
 
-# Handle both possible early-boot states automatically:
-# 1) OVMF/UEFI boot-device menu, and
-# 2) Windows "Press any key to boot from CD or DVD" prompt.
-bash "$INSTALL_DIR/scripts/auto-boot-windows.sh" "$VM_NAME"
+# Stop the just-created VM before the Microsoft DVD prompt can time out. The
+# VM has not installed Windows yet, so this is safe. Rebuild the Microsoft ISO
+# using Microsoft's own efisys_noprompt.bin, swap it into the VM, then boot.
+log 'Switching Windows installer to unattended no-prompt boot media...'
+virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
 
-log "Windows installation is running inside ${VM_NAME}."
+bash "$INSTALL_DIR/scripts/build-noprompt-windows-iso.sh" \
+  "$SOURCE_WINDOWS_ISO" "$NOPROMPT_WINDOWS_ISO"
+
+CDROM_TARGET="$(virsh domblklist "$VM_NAME" --details 2>/dev/null | \
+  awk -v src="$SOURCE_WINDOWS_ISO" '$1=="file" && $2=="cdrom" && $4==src {print $3; exit}')"
+
+[[ -n "$CDROM_TARGET" ]] || die 'Could not identify the Windows installer CD-ROM device in the VM.'
+
+virsh change-media "$VM_NAME" "$CDROM_TARGET" "$NOPROMPT_WINDOWS_ISO" \
+  --update --config --force >/dev/null
+
+virsh start "$VM_NAME" >/dev/null
+log 'Windows installer started with no-prompt UEFI media.'
 log "Automatic AD readiness check started for ${DC_IP}."
 
 READY=0
@@ -92,7 +108,6 @@ for ATTEMPT in $(seq 1 360); do
     break
   fi
 
-  # Show a small heartbeat roughly once per minute without flooding output.
   if (( ATTEMPT - LAST_NOTICE >= 6 )); then
     STATE="$(virsh domstate "$VM_NAME" 2>/dev/null | tr -d '\r' || true)"
     log "Still configuring Windows/AD... VM state: ${STATE:-unknown}"
@@ -114,7 +129,6 @@ if (( READY == 0 )); then
   exit 1
 fi
 
-# Allow the post-promotion validation/cleanup stage to settle, then verify again.
 sleep 30
 
 NETBIOS="$(printf '%s' "${DOMAIN_FQDN%%.*}" | tr '[:lower:]' '[:upper:]' | cut -c1-15)"
@@ -122,9 +136,9 @@ NETBIOS="$(printf '%s' "${DOMAIN_FQDN%%.*}" | tr '[:lower:]' '[:upper:]' | cut -
 printf '\n============================================================\n'
 printf ' Kali-AD-Lab | LAB READY\n'
 printf '============================================================\n'
-printf 'VM              : %s\n' "$VM_NAME"
-printf 'AD Domain       : %s\n' "$DOMAIN_FQDN"
+printf 'VM               : %s\n' "$VM_NAME"
+printf 'AD Domain        : %s\n' "$DOMAIN_FQDN"
 printf 'Domain Controller: %s\n' "$DC_IP"
-printf 'Login           : %s\\Administrator\n' "$NETBIOS"
+printf 'Login            : %s\\Administrator\n' "$NETBIOS"
 printf '\nOpen Virtual Machine Manager and open %s to use Windows.\n' "$VM_NAME"
 printf '============================================================\n'
