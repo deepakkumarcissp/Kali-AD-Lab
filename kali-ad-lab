@@ -3,7 +3,6 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 PROJECT='Kali-AD-Lab'
-REPO_URL='https://github.com/deepakkumarcissp/Kali-AD-Lab.git'
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 REPO_DIR="$(cd -- "$(dirname -- "$SELF")" && pwd)"
 BASE_DIR="/var/lib/libvirt/boot/${PROJECT}"
@@ -40,8 +39,8 @@ cat <<'BANNER'
 BANNER
 log "Run log: ${RUN_LOG}"
 
-# Best-effort self-update. A public checkout updates without authentication.
-# A private checkout continues with the local version if root has no GitHub auth.
+# Best-effort self-update. Public installations update without authentication.
+# A private checkout continues locally if GitHub authentication is unavailable.
 if [[ -d "${REPO_DIR}/.git" ]] && command -v git >/dev/null 2>&1; then
   if git -C "$REPO_DIR" fetch origin main >/dev/null 2>&1; then
     CURRENT="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || true)"
@@ -114,7 +113,7 @@ ports_ready(){
 
 if [[ "${1:-}" == '--status' ]]; then
   VM_NAME="${2:-$DEFAULT_VM_NAME}"
-  if ! virsh dominfo "$VM_NAME" >/dev/null 2>&1; then die "VM not found: ${VM_NAME}"; fi
+  virsh dominfo "$VM_NAME" >/dev/null 2>&1 || die "VM not found: ${VM_NAME}"
   printf 'VM: %s\nState: %s\n' "$VM_NAME" "$(virsh domstate "$VM_NAME" | tr -d '\r')"
   exit 0
 fi
@@ -152,8 +151,6 @@ VM_RAM_MB=$DEFAULT_RAM_MB
 VM_VCPUS=4
 (( HOST_CPUS < VM_VCPUS )) && VM_VCPUS=$HOST_CPUS
 (( HOST_RAM_MB < 10000 )) && VM_RAM_MB=4096
-AVAILABLE_GB=$(df --output=avail -BG "$IMAGE_DIR" | tail -1 | tr -dc '0-9')
-(( AVAILABLE_GB >= 30 )) || die 'At least 30 GB of free disk space is recommended for the first build.'
 
 while true; do
   VM_NAME="$(prompt_default 'Windows server / VM name' "$DEFAULT_VM_NAME")"
@@ -186,9 +183,6 @@ printf '\nWindows Server edition:\n  1) Standard Evaluation - Desktop Experience
 read -r -p 'Choose edition [1]: ' EDITION_CHOICE
 EDITION_CHOICE="${EDITION_CHOICE:-1}"
 [[ "$EDITION_CHOICE" == 1 || "$EDITION_CHOICE" == 2 ]] || die 'Edition choice must be 1 or 2.'
-printf '\nPasswords are used only inside this local lab and are never committed to Git.\n'
-ADMIN_PASSWORD="$(read_secret_twice 'Windows/Domain Administrator password')"
-DSRM_PASSWORD="$(read_secret_twice 'Directory Services Restore Mode (DSRM) password')"
 
 mapfile -t NV < <(derive_network_values "$LAB_SUBNET")
 GATEWAY_IP="${NV[0]}"
@@ -197,8 +191,10 @@ DHCP_START="${NV[2]}"
 DHCP_END="${NV[3]}"
 PREFIX_LEN="${NV[4]}"
 NETWORK_NAME="$DEFAULT_NETWORK_NAME"
+DISK_PATH="${IMAGE_DIR}/${VM_NAME}.qcow2"
+CONFIG_ISO="${BASE_DIR}/${VM_NAME}-LABCONFIG.iso"
 
-# Existing healthy labs are recognized instead of rebuilt.
+# Existing healthy labs are reported without asking for passwords or rebuilding.
 if virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
   if ports_ready "$DC_IP"; then
     printf '\n============================================================\n'
@@ -214,14 +210,41 @@ if virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
   warn "VM '${VM_NAME}' already exists but AD is not reachable."
   read -r -p 'Rebuild this lab VM? [y/N]: ' REBUILD
   [[ "$REBUILD" =~ ^[Yy]$ ]] || die 'Stopped without changing the existing VM.'
+  virsh managedsave-remove "$VM_NAME" >/dev/null 2>&1 || true
   virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
-  virsh undefine "$VM_NAME" --nvram --remove-all-storage >/dev/null 2>&1 || virsh undefine "$VM_NAME" --remove-all-storage >/dev/null 2>&1 || true
+  virsh undefine "$VM_NAME" --nvram >/dev/null 2>&1 || virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
+  rm -f "$DISK_PATH" "$CONFIG_ISO"
 fi
 
-# Network collision check against host routes and existing libvirt networks.
-CONFLICTS="$(python3 - "$LAB_SUBNET" "$NETWORK_NAME" <<'PY'
+# Remove harmless artifacts left by pre-V3 versions without touching cached Windows media.
+rm -rf "${BASE_DIR}/runtime-${VM_NAME}"
+rm -f "${BASE_DIR}/${VM_NAME}-LABTOOLS.iso" "${BASE_DIR}/${VM_NAME}-secret-cleanup.log"
+
+AVAILABLE_GB=$(df --output=avail -BG "$IMAGE_DIR" | tail -1 | tr -dc '0-9')
+(( AVAILABLE_GB >= 20 )) || die 'At least 20 GB of free disk space is required.'
+
+printf '\nPasswords are used only inside this local lab and are never committed to Git.\n'
+ADMIN_PASSWORD="$(read_secret_twice 'Windows/Domain Administrator password')"
+DSRM_PASSWORD="$(read_secret_twice 'Directory Services Restore Mode (DSRM) password')"
+
+# Validate any existing ad-lab network, including its forwarding mode.
+if virsh net-info "$NETWORK_NAME" >/dev/null 2>&1; then
+  readarray -t EXISTING_NET < <(python3 - "$NETWORK_NAME" <<'PY'
 import ipaddress,subprocess,sys,xml.etree.ElementTree as ET
-wanted=ipaddress.ip_network(sys.argv[1]); reuse=sys.argv[2]; hits=[]
+r=ET.fromstring(subprocess.check_output(['virsh','net-dumpxml',sys.argv[1]],text=True))
+n=r.find('ip')
+print(ipaddress.ip_network(f"{n.get('address')}/{n.get('netmask') or n.get('prefix')}",strict=False))
+f=r.find('forward'); print(f.get('mode','nat') if f is not None else 'isolated')
+PY
+)
+  [[ "${EXISTING_NET[0]}" == "$LAB_SUBNET" ]] || die "Existing ${NETWORK_NAME} uses ${EXISTING_NET[0]}, not ${LAB_SUBNET}."
+  [[ "${EXISTING_NET[1]}" == "$NETWORK_MODE" ]] || die "Existing ${NETWORK_NAME} mode is ${EXISTING_NET[1]}, not ${NETWORK_MODE}."
+  virsh net-start "$NETWORK_NAME" >/dev/null 2>&1 || true
+else
+  # Check the proposed subnet against host routes and other libvirt networks.
+  CONFLICTS="$(python3 - "$LAB_SUBNET" <<'PY'
+import ipaddress,subprocess,sys,xml.etree.ElementTree as ET
+wanted=ipaddress.ip_network(sys.argv[1]); hits=[]
 try:
     for line in subprocess.check_output(['ip','-o','-4','route','show'],text=True,stderr=subprocess.DEVNULL).splitlines():
         p=line.split()[0]
@@ -232,7 +255,6 @@ try:
 except Exception: pass
 try:
     for name in subprocess.check_output(['virsh','net-list','--all','--name'],text=True,stderr=subprocess.DEVNULL).split():
-        if name==reuse: continue
         try:
             r=ET.fromstring(subprocess.check_output(['virsh','net-dumpxml',name],text=True,stderr=subprocess.DEVNULL))
             for node in r.findall('ip'):
@@ -245,19 +267,8 @@ except Exception: pass
 print('\n'.join(hits))
 PY
 )"
-[[ -z "$CONFLICTS" ]] || die "Requested subnet overlaps another network:\n${CONFLICTS}"
+  [[ -z "$CONFLICTS" ]] || die "Requested subnet overlaps another network:\n${CONFLICTS}"
 
-# Create or validate the libvirt lab network.
-if virsh net-info "$NETWORK_NAME" >/dev/null 2>&1; then
-  EXISTING_CIDR="$(python3 - "$NETWORK_NAME" <<'PY'
-import ipaddress,subprocess,sys,xml.etree.ElementTree as ET
-r=ET.fromstring(subprocess.check_output(['virsh','net-dumpxml',sys.argv[1]],text=True))
-n=r.find('ip'); print(ipaddress.ip_network(f"{n.get('address')}/{n.get('netmask') or n.get('prefix')}",strict=False))
-PY
-)"
-  [[ "$EXISTING_CIDR" == "$LAB_SUBNET" ]] || die "Existing ${NETWORK_NAME} uses ${EXISTING_CIDR}, not ${LAB_SUBNET}."
-  virsh net-start "$NETWORK_NAME" >/dev/null 2>&1 || true
-else
   NET_XML="$(mktemp /tmp/kali-adlab-net.XXXXXX.xml)"
   if [[ "$NETWORK_MODE" == nat ]]; then FORWARD_XML="<forward mode='nat'/>"; else FORWARD_XML=''; fi
   cat > "$NET_XML" <<EOF
@@ -276,22 +287,25 @@ EOF
   rm -f "$NET_XML"
 fi
 
-# Download the official Microsoft source media once.
-if validate_iso "$SOURCE_ISO"; then
-  log 'Using cached Microsoft Windows Server 2025 source ISO.'
-else
-  rm -f "$SOURCE_ISO"
-  log 'Downloading Windows Server 2025 Evaluation ISO from Microsoft...'
-  curl -fL --retry 5 --retry-delay 3 --connect-timeout 30 --progress-bar "$WINDOWS_ISO_URL" -o "$SOURCE_ISO"
-  validate_iso "$SOURCE_ISO" || { rm -f "$SOURCE_ISO"; die 'Downloaded Microsoft ISO failed validation.'; }
-  chmod 644 "$SOURCE_ISO"
-fi
-
-# Build fingerprint changes only when Windows bootstrap content changes.
+# The build id is based only on content embedded into the reusable Windows ISO.
 BUILD_ID="$( { printf '%s\n' "$MEDIA_VERSION"; sha256sum "$REPO_DIR/windows/SetupComplete.cmd" "$REPO_DIR/windows/Configure-AD.ps1"; } | sha256sum | awk '{print $1}')"
+
 if validate_iso "$INSTALL_ISO" && [[ "$(cat "$MEDIA_META" 2>/dev/null || true)" == "$BUILD_ID" ]]; then
   log 'Using cached unattended Windows installer.'
 else
+  AVAILABLE_GB=$(df --output=avail -BG "$BASE_DIR" | tail -1 | tr -dc '0-9')
+  (( AVAILABLE_GB >= 35 )) || die 'At least 35 GB free is required while building the unattended Windows media.'
+
+  if validate_iso "$SOURCE_ISO"; then
+    log 'Using cached Microsoft Windows Server 2025 source ISO.'
+  else
+    rm -f "$SOURCE_ISO"
+    log 'Downloading Windows Server 2025 Evaluation ISO from Microsoft...'
+    curl -fL --retry 5 --retry-delay 3 --connect-timeout 30 --progress-bar "$WINDOWS_ISO_URL" -o "$SOURCE_ISO"
+    validate_iso "$SOURCE_ISO" || { rm -f "$SOURCE_ISO"; die 'Downloaded Microsoft ISO failed validation.'; }
+    chmod 644 "$SOURCE_ISO"
+  fi
+
   log 'Building unattended no-prompt Windows installer (one-time operation)...'
   WORK_DIR="$(mktemp -d /var/tmp/kali-adlab-media.XXXXXX)"
   MOUNT_DIR="$WORK_DIR/mnt"
@@ -303,17 +317,20 @@ else
     rm -rf "$WORK_DIR"
     rm -f "$PARTIAL"
   }
-  trap cleanup_media RETURN
+  trap cleanup_media EXIT
+
   mount -o loop,ro "$SOURCE_ISO" "$MOUNT_DIR"
   [[ -f "$MOUNT_DIR/boot/etfsboot.com" ]] || die 'Microsoft ISO is missing BIOS boot image.'
   [[ -f "$MOUNT_DIR/efi/microsoft/boot/efisys_noprompt.bin" ]] || die 'Microsoft ISO is missing no-prompt UEFI boot image.'
   cp -a "$MOUNT_DIR/." "$TREE_DIR/"
   umount "$MOUNT_DIR"
+
   OEM_DIR="$TREE_DIR/sources/\$OEM\$"
   mkdir -p "$OEM_DIR/\$1/ADLab" "$OEM_DIR/\$\$/Setup/Scripts"
   cp "$REPO_DIR/windows/Configure-AD.ps1" "$OEM_DIR/\$1/ADLab/Configure-AD.ps1"
   cp "$REPO_DIR/windows/SetupComplete.cmd" "$OEM_DIR/\$\$/Setup/Scripts/SetupComplete.cmd"
   printf '%s\n' "$MEDIA_VERSION" > "$OEM_DIR/\$1/ADLab/media-version.txt"
+
   rm -f "$PARTIAL"
   xorriso -as mkisofs -iso-level 3 -J -joliet-long -R -V "$MEDIA_VERSION" \
     -b boot/etfsboot.com -no-emul-boot -boot-load-size 8 -boot-info-table \
@@ -324,12 +341,13 @@ else
   chmod 644 "$INSTALL_ISO"
   printf '%s\n' "$BUILD_ID" > "$MEDIA_META"
   chmod 644 "$MEDIA_META"
+
   rm -rf "$WORK_DIR"
-  trap - RETURN
+  trap - EXIT
   log 'Unattended Windows installer is ready.'
 fi
 
-# Inspect editions in the prepared media.
+# Discover the requested Windows image index from the prepared media.
 ISO_MOUNT="$(mktemp -d /tmp/kali-adlab-wim.XXXXXX)"
 mount -o loop,ro "$INSTALL_ISO" "$ISO_MOUNT"
 WIM_PATH=''
@@ -348,10 +366,9 @@ else
 fi
 umount "$ISO_MOUNT"; rmdir "$ISO_MOUNT"
 
-# Build the small per-deployment secret/config media.
+# Build a small per-deployment ISO containing only answer/config data.
 RUNTIME_DIR="${BASE_DIR}/runtime-${VM_NAME}"
 MEDIA_DIR="${RUNTIME_DIR}/media"
-CONFIG_ISO="${BASE_DIR}/${VM_NAME}-LABCONFIG.iso"
 rm -rf "$RUNTIME_DIR"; mkdir -p "$MEDIA_DIR/ADLab"; chmod 700 "$RUNTIME_DIR" "$MEDIA_DIR" "$MEDIA_DIR/ADLab"
 DSRM_B64="$(printf '%s' "$DSRM_PASSWORD" | base64 -w0)"
 cat > "$MEDIA_DIR/ADLab/config.ps1" <<EOF
@@ -374,7 +391,6 @@ unset ADMIN_PASSWORD DSRM_PASSWORD DSRM_B64
 find "$RUNTIME_DIR" -type f -exec shred -u {} + 2>/dev/null || true
 rm -rf "$RUNTIME_DIR"
 
-DISK_PATH="${IMAGE_DIR}/${VM_NAME}.qcow2"
 rm -f "$DISK_PATH"
 qemu-img create -f qcow2 "$DISK_PATH" "${DEFAULT_DISK_GB}G" >/dev/null
 chown "$QEMU_USER:$QEMU_GROUP" "$DISK_PATH"; chmod 600 "$DISK_PATH"
@@ -406,8 +422,8 @@ if ! virt-install --connect qemu:///system --name "$VM_NAME" --memory "$VM_RAM_M
   die 'VM creation failed; the partial VM was cleaned up.'
 fi
 
-# The live first boot is already from the installer. Change only the persistent
-# next-boot order so all Windows reboots prefer the installed virtual disk.
+# The running first boot remains on the installer; only persistent future boots
+# are changed to hard-disk-first. This removes both the DVD prompt and boot loop.
 BOOT_XML="$(mktemp /tmp/kali-adlab-boot.XXXXXX.xml)"
 virsh dumpxml --inactive "$VM_NAME" > "$BOOT_XML"
 python3 - "$BOOT_XML" <<'PY'
@@ -433,8 +449,6 @@ virsh define "$BOOT_XML" >/dev/null
 rm -f "$BOOT_XML"
 log 'First boot: unattended Windows media. Subsequent boots: virtual hard disk.'
 
-# Keep the terminal attached to the outcome. Automatically recover a bounded
-# number of unexpected power-offs so the user never has to press Start manually.
 log 'Windows installation and AD configuration are now fully automatic.'
 log "Waiting for DNS/Kerberos/LDAP on ${DC_IP} (up to $((MAX_WAIT_SECONDS/60)) minutes)..."
 START_TS=$(date +%s)
@@ -448,9 +462,10 @@ while (( $(date +%s) - START_TS < MAX_WAIT_SECONDS )); do
   if [[ "$STATE" == 'shut off' ]]; then
     ((SHUTOFF_STREAK+=1))
     if (( SHUTOFF_STREAK >= 3 && AUTO_STARTS < 4 )); then
-      log "VM is powered off during deployment; automatically starting it (recovery $((AUTO_STARTS+1))/4)..."
+      log "VM powered off during deployment; automatically starting it (recovery $((AUTO_STARTS+1))/4)..."
       virsh start "$VM_NAME" >/dev/null || true
-      ((AUTO_STARTS+=1)); SHUTOFF_STREAK=0
+      ((AUTO_STARTS+=1))
+      SHUTOFF_STREAK=0
     fi
   else
     SHUTOFF_STREAK=0
@@ -467,7 +482,7 @@ done
 if (( READY == 0 )); then
   warn 'AD services did not become reachable within the expected window.'
   warn "VM state: $(virsh domstate "$VM_NAME" 2>/dev/null | tr -d '\r' || echo unknown)"
-  warn "The VM and config media have been left intact for recovery. Log: ${RUN_LOG}"
+  warn "The VM and LABCONFIG media were left intact so Windows can resume. Log: ${RUN_LOG}"
   exit 1
 fi
 
@@ -475,7 +490,7 @@ log 'AD services are reachable. Performing final stabilization check...'
 sleep 30
 ports_ready "$DC_IP" || die 'AD services became unavailable during final validation.'
 
-# Eject and destroy secret-bearing config media only after AD is healthy.
+# Secret-bearing config media is removed only after AD is proven healthy.
 CONFIG_TARGET="$(virsh domblklist "$VM_NAME" --details 2>/dev/null | awk -v src="$CONFIG_ISO" '$1=="file" && $2=="cdrom" && $4==src {print $3; exit}')"
 if [[ -n "$CONFIG_TARGET" ]]; then
   virsh change-media "$VM_NAME" "$CONFIG_TARGET" --eject --live --force >/dev/null 2>&1 || true
