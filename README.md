@@ -1,48 +1,40 @@
 # Kali-AD-Lab
 
-Build a complete Windows Server Active Directory lab on Kali Linux with a simple guided installer.
+Build a complete Windows Server 2025 Active Directory lab on Kali Linux with one guided command.
 
-The project installs and configures KVM/QEMU + libvirt, downloads the official Microsoft Windows Server 2025 Evaluation ISO, creates a safe virtual network, performs an unattended Windows installation, configures a static IP, installs AD DS/DNS, creates a new forest, validates the Domain Controller, and removes temporary unattended secrets.
+Kali-AD-Lab installs and configures KVM/QEMU + libvirt, downloads the official Microsoft Windows Server 2025 Evaluation ISO, creates a safe virtual network, performs an unattended Windows installation, configures a static IP, installs AD DS and DNS, creates a new forest, survives required Windows reboots automatically, validates DNS/Kerberos/LDAP, and removes temporary secret-bearing setup media after success.
 
 > Designed for cybersecurity learning, administration practice, defensive testing, and authorized lab research.
 
-## Quick Start
-
-### After Kali-AD-Lab is installed
-
-Run just:
-
-```bash
-sudo kali-ad-lab
-```
-
-The launcher updates Kali-AD-Lab automatically and starts the guided setup.
+## Quick start
 
 ### First-time install after this repository is public
 
-Users will be able to copy and paste one command:
+Copy and paste one command:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/deepakkumarcissp/Kali-AD-Lab/main/bootstrap.sh | sudo bash
 ```
 
-That command installs Kali-AD-Lab and immediately starts the setup wizard. After that, future runs only require:
+That command installs Kali-AD-Lab and immediately starts the guided deployment.
+
+After installation, future launches are simply:
 
 ```bash
 sudo kali-ad-lab
 ```
 
-### Testing while this repository is private
+### While this repository is private
 
-GitHub authentication is required to obtain a private repository. From an already authenticated clone, run:
+GitHub authentication is required to obtain a private repository. From an authenticated clone:
 
 ```bash
 sudo ./kali-ad-lab
 ```
 
-## What the installer asks
+## What the user is asked
 
-The installer uses sensible defaults and only asks for settings that are environment-specific or security-sensitive:
+Only environment-specific or security-sensitive values are requested:
 
 | Setting | Default |
 |---|---|
@@ -55,34 +47,37 @@ The installer uses sensible defaults and only asks for settings that are environ
 | Administrator password | Prompted securely |
 | DSRM password | Prompted securely |
 
-Press **Enter** to accept any recommended default.
+Press **Enter** to accept recommended defaults.
 
-### Why `adlab.test` instead of `adlab.local`?
+`.test` is used instead of `.local` because `.local` is commonly associated with multicast DNS and can create avoidable name-resolution conflicts.
 
-`.local` is commonly used by multicast DNS and can cause unnecessary name-resolution conflicts. The default therefore uses `.test`, which is better suited to an isolated training environment.
+## What is automatic
 
-## What is fully automated
+After the prompts, Kali-AD-Lab automatically:
 
-After the prompts, the project automatically:
+1. Installs/validates KVM, QEMU, libvirt, virt-manager, OVMF, xorriso, wimtools and supporting packages.
+2. Checks CPU virtualization, RAM and disk capacity.
+3. Detects the QEMU runtime account and fixes libvirt storage permissions before VM creation.
+4. Checks the requested subnet for conflicts and creates/reuses the `ad-lab` network.
+5. Downloads Windows Server 2025 Evaluation directly from Microsoft's official redirect and caches the source ISO.
+6. Builds a cached no-prompt UEFI Windows installer so no `Press any key to boot from CD/DVD` interaction is required.
+7. Embeds the Windows bootstrap files using the supported `$OEM$` setup path.
+8. Creates a small per-deployment config ISO containing the generated answer file and runtime AD settings.
+9. Creates the QCOW2 disk with permissions already correct for QEMU.
+10. Starts Windows Setup automatically.
+11. Changes only the *next* persistent boot order to hard-disk-first so Windows can reboot without returning to setup media.
+12. Completes Windows Setup with no GUI clicks.
+13. Copies the runtime config locally and starts one resumable `Configure-AD.ps1` engine.
+14. Configures the DC static IP.
+15. Installs AD DS and DNS.
+16. Reboots automatically only when Windows requires it.
+17. Creates the first forest/domain and resumes automatically after domain-promotion reboot.
+18. Validates AD DS, DNS, Kerberos and LDAP.
+19. Automatically restarts the VM a bounded number of times if it unexpectedly powers off during deployment.
+20. Ejects and securely removes the secret-bearing config ISO only after AD is healthy.
+21. Prints a final `LAB READY` summary with the VM, domain, DC IP and login name.
 
-1. Checks Intel VT-x / AMD-V support.
-2. Installs KVM/QEMU, libvirt, virt-manager, OVMF and supporting tools.
-3. Checks available host RAM, CPU and disk space.
-4. Detects an existing VM with the same name and refuses to overwrite it silently.
-5. Checks the requested lab subnet against host and libvirt networks.
-6. Suggests another private subnet if the requested range overlaps.
-7. Creates a libvirt NAT or fully isolated network.
-8. Downloads the Windows Server 2025 Evaluation ISO from Microsoft's official download redirect.
-9. Validates the downloaded ISO and identifies the required Windows image.
-10. Creates temporary unattended installation media.
-11. Creates and starts the Windows Server VM.
-12. Performs Windows installation without Windows Setup clicks.
-13. Configures the Domain Controller static IP.
-14. Installs Active Directory Domain Services and DNS.
-15. Creates the AD forest.
-16. Reboots automatically as required.
-17. Validates AD services.
-18. Removes temporary unattended secrets and setup media after successful promotion.
+No manual boot-menu selection, no manual PowerShell domain-promotion command, and no copy/paste into the Windows guest should be required.
 
 ## Default architecture
 
@@ -108,86 +103,118 @@ After the prompts, the project automatically:
 
 ### NAT mode - default
 
-The Domain Controller can make outbound Internet connections through libvirt NAT for Windows Evaluation activation and updates. It is **not bridged directly to your physical LAN**.
+The DC can make outbound Internet connections through libvirt NAT for Windows evaluation activation/updates. The guest is not bridged directly to the physical LAN.
 
 ### Isolated mode
 
-No Internet forwarding is configured for the lab network. Use this when you want a completely disconnected AD lab.
+No Internet forwarding is configured for the lab network.
 
 ## Default VM resources
 
 | Resource | Default |
 |---|---|
-| Memory | 6 GB |
-| vCPU | 4 |
+| Memory | 6 GB (automatically lowered to 4 GB on smaller hosts) |
+| vCPU | Up to 4 |
 | Disk | 80 GB sparse QCOW2 |
 | Firmware | UEFI / OVMF |
 | Network adapter | Emulated Intel adapter for Windows compatibility |
 | Display | SPICE/VGA |
 
-## Windows Server evaluation media
+## Windows media handling
 
-The project uses **Windows Server 2025 Evaluation**, downloaded directly from Microsoft. The Microsoft ISO is never stored in this GitHub repository.
+The Microsoft Windows Server ISO is downloaded directly from Microsoft and is never committed to GitHub.
 
-## Password handling
+The first run creates two local media files:
 
-Administrator and Directory Services Restore Mode passwords are entered with hidden terminal prompts and are never committed to Git.
+- a reusable cached unattended Windows installer derived from the Microsoft evaluation ISO;
+- a small per-deployment config ISO containing only the current lab's answer file and runtime configuration.
 
-During unattended Windows installation, credentials temporarily exist only in locally generated setup media. Kali-AD-Lab removes the generated secret configuration and temporary LABTOOLS ISO after successful AD promotion.
+The config ISO contains sensitive setup values and is automatically ejected and securely removed after AD health validation. Do not use production passwords for a lab.
 
-Do not use production or corporate passwords in a lab.
+## Resumable AD configuration
 
-## Collision and safety behavior
-
-Kali-AD-Lab is deliberately conservative:
-
-- Existing VM names are never silently overwritten.
-- Existing network ranges are checked before creation.
-- Compatible existing lab networks can be reused.
-- The Domain Controller is not bridged directly to the physical LAN.
-- Temporary setup secrets are cleaned up automatically after successful promotion.
-
-## Using the lab
-
-After successful AD promotion, sign in to the Windows Server VM as:
+Windows uses one idempotent script:
 
 ```text
-ADLAB\Administrator
+C:\ADLab\Configure-AD.ps1
 ```
 
-Use the Administrator password you entered during setup.
+It is registered as a SYSTEM startup task and safely resumes after any required reboot. The script detects whether the machine is still a workgroup server or is already a domain controller, so it does not depend on fragile `Stage1 -> Stage2 -> Stage3` sequencing.
 
-Windows writes a success marker at:
+Windows writes:
 
 ```text
 C:\ADLab\SUCCESS.txt
 ```
 
-## Remove the lab
+when the domain controller has been validated successfully.
 
-The repository includes a safe teardown script that removes the selected VM and lab network without uninstalling KVM/libvirt from the Kali host.
+Detailed Windows-side logs are under:
+
+```text
+C:\ADLab\Logs\
+```
+
+The Kali-side run log is written under:
+
+```text
+/var/log/kali-ad-lab/
+```
+
+## Success screen
+
+A successful run ends with a summary similar to:
+
+```text
+============================================================
+ Kali-AD-Lab | LAB READY
+============================================================
+VM               : DC01
+AD Domain        : adlab.test
+Domain Controller: 192.168.77.10
+DNS              : READY
+Kerberos         : READY
+LDAP             : READY
+Login            : ADLAB\Administrator
+============================================================
+```
+
+## Safety behavior
+
+Kali-AD-Lab deliberately avoids destructive surprises:
+
+- a healthy existing lab is detected and reported instead of rebuilt;
+- an unhealthy existing VM is never deleted without confirmation;
+- network overlap is checked before creation;
+- the DC is not bridged directly to the physical LAN;
+- only generated lab media/storage is modified;
+- secret-bearing config media is retained if deployment fails so the guest can recover, then removed only after success.
 
 ## Repository layout
 
 ```text
 Kali-AD-Lab/
-├── bootstrap.sh
-├── kali-ad-lab
-├── setup.sh
+├── bootstrap.sh                 # first-time installer/launcher
+├── kali-ad-lab                  # single deployment orchestrator
 ├── templates/
 │   └── Autounattend.xml.template
 ├── windows/
-│   ├── SetupComplete.cmd
-│   ├── Stage1.ps1
-│   ├── Stage2.ps1
-│   └── Stage3.ps1
+│   ├── SetupComplete.cmd        # hands off Windows Setup to Configure-AD
+│   └── Configure-AD.ps1         # resumable AD DS/DNS/forest engine
 ├── scripts/
-│   ├── cleanup-secrets.sh
-│   └── destroy-lab.sh
+│   └── destroy-lab.sh           # optional safe teardown helper
 ├── .gitignore
 ├── LICENSE
 └── README.md
 ```
+
+## Remove a lab
+
+The optional teardown helper removes the selected VM and lab network without uninstalling KVM/libvirt from the Kali host. The cached Microsoft/unattended Windows media is retained so a future lab does not need another multi-gigabyte download/build.
+
+## Before public release
+
+The installer has been hardened from real deployment troubleshooting, including QEMU permission problems, Windows DVD boot prompts, UEFI boot-order loops, interrupted Windows Setup, fragile specialize-phase media discovery, VM shutoff during setup, and manual AD promotion. Perform one final clean-machine run of the current `main` branch before changing the repository to public so the exact release candidate is validated end-to-end without guest interaction.
 
 ## Planned community roadmap
 
@@ -207,4 +234,4 @@ Use this project only on systems and networks you own or are explicitly authoriz
 
 ## License
 
-This repository is currently licensed under the **GNU General Public License v3.0 (GPL-3.0)**. See `LICENSE`.
+This repository is licensed under the **GNU General Public License v3.0 (GPL-3.0)**. See `LICENSE`.
