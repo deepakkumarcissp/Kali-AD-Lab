@@ -79,15 +79,6 @@
       <RegisteredOwner>Kali-AD-Lab</RegisteredOwner>
       <RegisteredOrganization>Kali-AD-Lab</RegisteredOrganization>
     </component>
-    <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
-      <RunSynchronous>
-        <RunSynchronousCommand wcm:action="add">
-          <Order>1</Order>
-          <Description>Copy Kali-AD-Lab bootstrap files</Description>
-          <Path>powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "$d=(Get-Volume -FileSystemLabel 'LABTOOLS' | Select-Object -First 1).DriveLetter; if (-not $d) { throw 'LABTOOLS media not found' }; New-Item -ItemType Directory -Path 'C:\ADLab' -Force | Out-Null; Copy-Item ($d + ':\ADLab\*') 'C:\ADLab\' -Recurse -Force; New-Item -ItemType Directory -Path 'C:\Windows\Setup\Scripts' -Force | Out-Null; Copy-Item 'C:\ADLab\SetupComplete.cmd' 'C:\Windows\Setup\Scripts\SetupComplete.cmd' -Force"</Path>
-        </RunSynchronousCommand>
-      </RunSynchronous>
-    </component>
   </settings>
 
   <settings pass="oobeSystem">
