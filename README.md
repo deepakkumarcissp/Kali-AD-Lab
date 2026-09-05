@@ -61,21 +61,23 @@ After the prompts, Kali-AD-Lab automatically:
 4. Checks the requested subnet for conflicts and creates/reuses the `ad-lab` network.
 5. Downloads Windows Server 2025 Evaluation directly from Microsoft's official redirect and caches the source ISO.
 6. Builds a cached no-prompt UEFI Windows installer so no `Press any key to boot from CD/DVD` interaction is required.
-7. Embeds the Windows bootstrap files using the supported `$OEM$` setup path.
+7. Embeds the reusable Windows bootstrap/AD engine using the supported `$OEM$` setup path.
 8. Creates a small per-deployment config ISO containing the generated answer file and runtime AD settings.
 9. Creates the QCOW2 disk with permissions already correct for QEMU.
 10. Starts Windows Setup automatically.
 11. Changes only the *next* persistent boot order to hard-disk-first so Windows can reboot without returning to setup media.
 12. Completes Windows Setup with no GUI clicks.
-13. Copies the runtime config locally and starts one resumable `Configure-AD.ps1` engine.
-14. Configures the DC static IP.
-15. Installs AD DS and DNS.
-16. Reboots automatically only when Windows requires it.
-17. Creates the first forest/domain and resumes automatically after domain-promotion reboot.
-18. Validates AD DS, DNS, Kerberos and LDAP.
-19. Automatically restarts the VM a bounded number of times if it unexpectedly powers off during deployment.
-20. Ejects and securely removes the secret-bearing config ISO only after AD is healthy.
-21. Prints a final `LAB READY` summary with the VM, domain, DC IP and login name.
+13. Performs one controlled Administrator auto-logon only after OOBE has completed.
+14. Invokes the same idempotent bootstrap after OOBE as a fallback even if Windows already ran `SetupComplete.cmd` automatically.
+15. Copies the runtime config and `Configure-AD.ps1` locally, registers a SYSTEM startup task, and disables the one-time auto-logon.
+16. Configures the DC static IP.
+17. Installs AD DS and DNS.
+18. Reboots automatically only when Windows requires it.
+19. Creates the first forest/domain and resumes automatically after domain-promotion reboot.
+20. Validates AD DS, DNS, Kerberos and LDAP.
+21. Automatically restarts the VM a bounded number of times if it unexpectedly powers off during deployment.
+22. Ejects and securely removes the secret-bearing config ISO only after AD is healthy.
+23. Prints a final `LAB READY` summary with the VM, domain, DC IP and login name.
 
 No manual boot-menu selection, no manual PowerShell domain-promotion command, and no copy/paste into the Windows guest should be required.
 
@@ -131,15 +133,19 @@ The first run creates two local media files:
 
 The config ISO contains sensitive setup values and is automatically ejected and securely removed after AD health validation. Do not use production passwords for a lab.
 
-## Resumable AD configuration
+## Post-OOBE bootstrap and resumable AD configuration
 
-Windows uses one idempotent script:
+The installer deliberately does **not** start AD configuration during Windows `specialize`. Windows Setup is allowed to finish completely first.
+
+After OOBE, a one-time Administrator auto-logon invokes the idempotent bootstrap. The bootstrap locates the attached Windows/config media, copies the runtime files to `C:\ADLab`, registers the AD engine as a SYSTEM startup task, disables the one-time auto-logon, and starts the engine.
+
+Windows then uses one idempotent script:
 
 ```text
 C:\ADLab\Configure-AD.ps1
 ```
 
-It is registered as a SYSTEM startup task and safely resumes after any required reboot. The script detects whether the machine is still a workgroup server or is already a domain controller, so it does not depend on fragile `Stage1 -> Stage2 -> Stage3` sequencing.
+It safely resumes after any required reboot. The script detects whether the machine is still a workgroup server or is already a domain controller, so it does not depend on fragile `Stage1 -> Stage2 -> Stage3` sequencing.
 
 Windows writes:
 
@@ -199,7 +205,7 @@ Kali-AD-Lab/
 ├── templates/
 │   └── Autounattend.xml.template
 ├── windows/
-│   ├── SetupComplete.cmd        # hands off Windows Setup to Configure-AD
+│   ├── SetupComplete.cmd        # idempotent post-Setup/OOBE bootstrap
 │   └── Configure-AD.ps1         # resumable AD DS/DNS/forest engine
 ├── scripts/
 │   └── destroy-lab.sh           # optional safe teardown helper
@@ -214,7 +220,7 @@ The optional teardown helper removes the selected VM and lab network without uni
 
 ## Before public release
 
-The installer has been hardened from real deployment troubleshooting, including QEMU permission problems, Windows DVD boot prompts, UEFI boot-order loops, interrupted Windows Setup, fragile specialize-phase media discovery, VM shutoff during setup, and manual AD promotion. Perform one final clean-machine run of the current `main` branch before changing the repository to public so the exact release candidate is validated end-to-end without guest interaction.
+The installer has been hardened from real deployment troubleshooting, including QEMU permission problems, Windows DVD boot prompts, UEFI boot-order loops, interrupted Windows Setup, fragile specialize-phase automation, VM shutoff during setup, and manual AD promotion. Perform one final clean-machine run of the current `main` branch before changing the repository to public so the exact release candidate is validated end-to-end without guest interaction.
 
 ## Planned community roadmap
 
