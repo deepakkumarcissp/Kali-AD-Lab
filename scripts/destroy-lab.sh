@@ -6,6 +6,8 @@ NETWORK_NAME="${2:-ad-lab}"
 PROJECT='Kali-AD-Lab'
 BASE_DIR="/var/lib/libvirt/boot/${PROJECT}"
 IMAGE_DIR="/var/lib/libvirt/images/${PROJECT}"
+DISK_PATH="${IMAGE_DIR}/${VM_NAME}.qcow2"
+CONFIG_ISO="${BASE_DIR}/${VM_NAME}-LABCONFIG.iso"
 
 if [[ ${EUID} -ne 0 ]]; then
   exec sudo -E bash "$0" "$@"
@@ -24,20 +26,24 @@ read -r -p "Type DELETE-LAB to permanently remove the VM and lab network: " CONF
 [[ "$CONFIRM" == 'DELETE-LAB' ]] || { echo 'Cancelled.'; exit 0; }
 
 if virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
+  virsh managedsave-remove "$VM_NAME" >/dev/null 2>&1 || true
   virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
-  virsh undefine "$VM_NAME" --nvram --remove-all-storage >/dev/null 2>&1 \
-    || virsh undefine "$VM_NAME" --remove-all-storage >/dev/null 2>&1 \
+  virsh undefine "$VM_NAME" --nvram >/dev/null 2>&1 \
+    || virsh undefine "$VM_NAME" >/dev/null 2>&1 \
     || true
 fi
+
+rm -f "$DISK_PATH" 2>/dev/null || true
+if [[ -f "$CONFIG_ISO" ]]; then
+  shred -u "$CONFIG_ISO" 2>/dev/null || rm -f "$CONFIG_ISO"
+fi
+rm -rf "${BASE_DIR}/runtime-${VM_NAME}"
+rm -f "${BASE_DIR}/${VM_NAME}-LABTOOLS.iso" "${BASE_DIR}/${VM_NAME}-secret-cleanup.log"
 
 if virsh net-info "$NETWORK_NAME" >/dev/null 2>&1; then
   virsh net-destroy "$NETWORK_NAME" >/dev/null 2>&1 || true
   virsh net-undefine "$NETWORK_NAME" >/dev/null 2>&1 || true
 fi
 
-rm -rf "${BASE_DIR}/runtime-${VM_NAME}"
-rm -f "${BASE_DIR}/${VM_NAME}-LABTOOLS.iso" "${BASE_DIR}/${VM_NAME}-secret-cleanup.log"
-rm -f "${IMAGE_DIR}/${VM_NAME}.qcow2" 2>/dev/null || true
-
 echo 'Lab VM and selected lab network removed.'
-echo 'The downloaded Microsoft Windows Server ISO was intentionally retained for reuse.'
+echo 'Cached Microsoft and unattended Windows Server media were intentionally retained for reuse.'
