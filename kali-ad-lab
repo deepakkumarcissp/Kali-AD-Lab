@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+REPO_URL="https://github.com/deepakkumarcissp/Kali-AD-Lab.git"
+INSTALL_DIR="${KALI_AD_LAB_HOME:-/opt/Kali-AD-Lab}"
+
+log(){ printf '[Kali-AD-Lab] %s\n' "$*"; }
+die(){ printf '[Kali-AD-Lab] ERROR: %s\n' "$*" >&2; exit 1; }
+
+if [[ ${EUID} -ne 0 ]]; then
+  exec sudo -E bash "$0" "$@"
+fi
+
+command -v git >/dev/null 2>&1 || {
+  log 'Installing Git...'
+  apt-get update
+  apt-get install -y git
+}
+
+if [[ -d "${INSTALL_DIR}/.git" ]]; then
+  log 'Updating Kali-AD-Lab...'
+  git -C "$INSTALL_DIR" fetch origin main
+  git -C "$INSTALL_DIR" reset --hard origin/main
+else
+  if [[ -e "$INSTALL_DIR" ]]; then
+    die "${INSTALL_DIR} already exists but is not a Kali-AD-Lab Git checkout. Move/remove it or set KALI_AD_LAB_HOME to another path."
+  fi
+  log "Installing Kali-AD-Lab into ${INSTALL_DIR}..."
+  mkdir -p "$(dirname "$INSTALL_DIR")"
+  git clone "$REPO_URL" "$INSTALL_DIR"
+fi
+
+chmod +x "$INSTALL_DIR/setup.sh"
+
+# Make future launches even simpler after the first successful invocation.
+ln -sf "$INSTALL_DIR/kali-ad-lab" /usr/local/bin/kali-ad-lab 2>/dev/null || true
+
+exec bash "$INSTALL_DIR/setup.sh" "$@"
