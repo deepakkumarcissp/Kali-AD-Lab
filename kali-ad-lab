@@ -4,8 +4,6 @@ set -Eeuo pipefail
 REPO_URL="https://github.com/deepakkumarcissp/Kali-AD-Lab.git"
 DEFAULT_INSTALL_DIR="/opt/Kali-AD-Lab"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-SOURCE_WINDOWS_ISO="/var/lib/libvirt/boot/Kali-AD-Lab/Windows_Server_2025_Evaluation_x64.iso"
-NOPROMPT_WINDOWS_ISO="/var/lib/libvirt/boot/Kali-AD-Lab/Windows_Server_2025_Evaluation_x64_noprompt.iso"
 
 log(){ printf '[Kali-AD-Lab] %s\n' "$*"; }
 warn(){ printf '[Kali-AD-Lab] WARNING: %s\n' "$*" >&2; }
@@ -53,8 +51,14 @@ fi
 chmod +x \
   "$INSTALL_DIR/setup.sh" \
   "$INSTALL_DIR/kali-ad-lab" \
-  "$INSTALL_DIR/scripts/build-noprompt-windows-iso.sh"
+  "$INSTALL_DIR/scripts/build-noprompt-windows-iso.sh" \
+  "$INSTALL_DIR/scripts/prepare-windows-media.sh"
 ln -sf "$INSTALL_DIR/kali-ad-lab" /usr/local/bin/kali-ad-lab 2>/dev/null || true
+
+# Prepare the final unattended Windows ISO before setup.sh creates the VM.
+# This avoids ever starting the guest with Microsoft's keypress-gated DVD.
+log 'Preparing Windows installation media...'
+bash "$INSTALL_DIR/scripts/prepare-windows-media.sh"
 
 RUN_LOG="$(mktemp /tmp/kali-ad-lab-run.XXXXXX.log)"
 cleanup(){ rm -f "$RUN_LOG"; }
@@ -77,25 +81,7 @@ DC_IP="$(awk -F': ' '/^DC IP: /{v=$2} END{print v}' "$RUN_LOG")"
   exit 0
 }
 
-# Stop the just-created VM before the Microsoft DVD prompt can time out. The
-# VM has not installed Windows yet, so this is safe. Rebuild the Microsoft ISO
-# using Microsoft's own efisys_noprompt.bin, swap it into the VM, then boot.
-log 'Switching Windows installer to unattended no-prompt boot media...'
-virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
-
-bash "$INSTALL_DIR/scripts/build-noprompt-windows-iso.sh" \
-  "$SOURCE_WINDOWS_ISO" "$NOPROMPT_WINDOWS_ISO"
-
-CDROM_TARGET="$(virsh domblklist "$VM_NAME" --details 2>/dev/null | \
-  awk -v src="$SOURCE_WINDOWS_ISO" '$1=="file" && $2=="cdrom" && $4==src {print $3; exit}')"
-
-[[ -n "$CDROM_TARGET" ]] || die 'Could not identify the Windows installer CD-ROM device in the VM.'
-
-virsh change-media "$VM_NAME" "$CDROM_TARGET" "$NOPROMPT_WINDOWS_ISO" \
-  --update --config --force >/dev/null
-
-virsh start "$VM_NAME" >/dev/null
-log 'Windows installer started with no-prompt UEFI media.'
+log "Windows installation is running inside ${VM_NAME}."
 log "Automatic AD readiness check started for ${DC_IP}."
 
 READY=0
