@@ -1,130 +1,487 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+IFS=$'\n\t'
 
-REPO_URL="https://github.com/deepakkumarcissp/Kali-AD-Lab.git"
-DEFAULT_INSTALL_DIR="/opt/Kali-AD-Lab"
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT='Kali-AD-Lab'
+REPO_URL='https://github.com/deepakkumarcissp/Kali-AD-Lab.git'
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+REPO_DIR="$(cd -- "$(dirname -- "$SELF")" && pwd)"
+BASE_DIR="/var/lib/libvirt/boot/${PROJECT}"
+IMAGE_DIR="/var/lib/libvirt/images/${PROJECT}"
+SOURCE_ISO="${BASE_DIR}/Windows_Server_2025_Evaluation_x64_source.iso"
+INSTALL_ISO="${BASE_DIR}/Windows_Server_2025_Evaluation_x64.iso"
+MEDIA_META="${INSTALL_ISO}.build-id"
+WINDOWS_ISO_URL='https://aka.ms/WinServ2025iso-enus'
+DEFAULT_VM_NAME='DC01'
+DEFAULT_DOMAIN='adlab.test'
+DEFAULT_NETWORK_NAME='ad-lab'
+DEFAULT_SUBNET='192.168.77.0/24'
+DEFAULT_RAM_MB=6144
+DEFAULT_DISK_GB=80
+MEDIA_VERSION='WS25_ADLAB_V3'
+MAX_WAIT_SECONDS=5400
 
 log(){ printf '[Kali-AD-Lab] %s\n' "$*"; }
 warn(){ printf '[Kali-AD-Lab] WARNING: %s\n' "$*" >&2; }
 die(){ printf '[Kali-AD-Lab] ERROR: %s\n' "$*" >&2; exit 1; }
 
 if [[ ${EUID} -ne 0 ]]; then
-  exec sudo -E bash "$0" "$@"
+  exec sudo -E bash "$SELF" "$@"
 fi
 
-command -v git >/dev/null 2>&1 || {
-  log 'Installing Git...'
-  apt-get update
-  apt-get install -y git
-}
+mkdir -p /var/log/kali-ad-lab
+RUN_LOG="/var/log/kali-ad-lab/run-$(date '+%Y%m%d-%H%M%S').log"
+exec > >(tee -a "$RUN_LOG") 2>&1
 
-# When launched from an existing checkout (ideal for private-repo testing),
-# use that checkout directly. Public/bootstrap installs use /opt/Kali-AD-Lab.
-if [[ -d "${SCRIPT_DIR}/.git" ]]; then
-  INSTALL_DIR="$SCRIPT_DIR"
-  log "Using current repository checkout: ${INSTALL_DIR}"
+cat <<'BANNER'
+============================================================
+ Kali-AD-Lab | One-command Windows Server AD lab builder
+============================================================
+BANNER
+log "Run log: ${RUN_LOG}"
 
-  if git -C "$INSTALL_DIR" fetch origin main >/dev/null 2>&1; then
-    git -C "$INSTALL_DIR" reset --hard origin/main >/dev/null
-    log 'Repository updated to origin/main.'
-  else
-    warn 'Could not refresh the private repository as root; continuing with the current checked-out version.'
-  fi
-else
-  INSTALL_DIR="${KALI_AD_LAB_HOME:-$DEFAULT_INSTALL_DIR}"
-
-  if [[ -d "${INSTALL_DIR}/.git" ]]; then
-    log 'Updating Kali-AD-Lab...'
-    git -C "$INSTALL_DIR" fetch origin main
-    git -C "$INSTALL_DIR" reset --hard origin/main
-  else
-    if [[ -e "$INSTALL_DIR" ]]; then
-      die "${INSTALL_DIR} already exists but is not a Kali-AD-Lab Git checkout."
+# Best-effort self-update. A public checkout updates without authentication.
+# A private checkout continues with the local version if root has no GitHub auth.
+if [[ -d "${REPO_DIR}/.git" ]] && command -v git >/dev/null 2>&1; then
+  if git -C "$REPO_DIR" fetch origin main >/dev/null 2>&1; then
+    CURRENT="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || true)"
+    REMOTE="$(git -C "$REPO_DIR" rev-parse origin/main 2>/dev/null || true)"
+    if [[ -n "$REMOTE" && "$CURRENT" != "$REMOTE" ]]; then
+      log 'Updating repository to origin/main and restarting installer...'
+      git -C "$REPO_DIR" reset --hard origin/main >/dev/null
+      exec bash "$REPO_DIR/kali-ad-lab" "$@"
     fi
-    log "Installing Kali-AD-Lab into ${INSTALL_DIR}..."
-    mkdir -p "$(dirname "$INSTALL_DIR")"
-    git clone "$REPO_URL" "$INSTALL_DIR"
+  else
+    warn 'Repository refresh was unavailable; continuing with the checked-out installer.'
   fi
 fi
 
-chmod +x \
-  "$INSTALL_DIR/setup.sh" \
-  "$INSTALL_DIR/kali-ad-lab" \
-  "$INSTALL_DIR/scripts/build-noprompt-windows-iso.sh" \
-  "$INSTALL_DIR/scripts/prepare-windows-media.sh" \
-  "$INSTALL_DIR/scripts/set-next-boot-disk.sh"
-ln -sf "$INSTALL_DIR/kali-ad-lab" /usr/local/bin/kali-ad-lab 2>/dev/null || true
-
-# Prepare the final unattended Windows ISO before setup.sh creates the VM.
-# This avoids ever starting the guest with Microsoft's keypress-gated DVD.
-log 'Preparing Windows installation media...'
-bash "$INSTALL_DIR/scripts/prepare-windows-media.sh"
-
-RUN_LOG="$(mktemp /tmp/kali-ad-lab-run.XXXXXX.log)"
-cleanup(){ rm -f "$RUN_LOG"; }
-trap cleanup EXIT
-
-log 'Starting automated Active Directory lab deployment...'
-set +e
-bash "$INSTALL_DIR/setup.sh" "$@" 2>&1 | tee "$RUN_LOG"
-SETUP_RC=${PIPESTATUS[0]}
-set -e
-
-(( SETUP_RC == 0 )) || die "Setup exited with code ${SETUP_RC}. Review the error shown above."
-
-VM_NAME="$(awk -F': ' '/^VM: /{v=$2} END{print v}' "$RUN_LOG")"
-DOMAIN_FQDN="$(awk -F': ' '/^Domain: /{v=$2} END{print v}' "$RUN_LOG")"
-DC_IP="$(awk -F': ' '/^DC IP: /{v=$2} END{print v}' "$RUN_LOG")"
-
-[[ -n "$VM_NAME" && -n "$DOMAIN_FQDN" && -n "$DC_IP" ]] || {
-  warn 'VM creation finished, but readiness details could not be parsed. The deployment output above contains the generated values.'
-  exit 0
+prompt_default(){ local p="$1" d="$2" v; read -r -p "${p} [${d}]: " v; printf '%s' "${v:-$d}"; }
+read_secret_twice(){
+  local label="$1" p1 p2
+  while true; do
+    read -r -s -p "${label}: " p1; printf '\n' >&2
+    read -r -s -p "Confirm ${label}: " p2; printf '\n' >&2
+    [[ "$p1" == "$p2" ]] || { warn 'Passwords did not match.'; continue; }
+    (( ${#p1} >= 12 )) || { warn 'Use at least 12 characters.'; continue; }
+    [[ "$p1" =~ [A-Z] && "$p1" =~ [a-z] && "$p1" =~ [0-9] && "$p1" =~ [^A-Za-z0-9] ]] || { warn 'Use uppercase, lowercase, a number, and a special character.'; continue; }
+    printf '%s' "$p1"; return
+  done
+}
+validate_vm_name(){ [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,14}$ && ! "$1" =~ -$ ]]; }
+validate_netbios(){ [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,14}$ && ! "$1" =~ -$ ]]; }
+validate_domain(){ python3 - "$1" <<'PY'
+import re,sys
+n=sys.argv[1].strip().lower()
+if len(n)>253 or '.' not in n: raise SystemExit(1)
+for x in n.split('.'):
+    if not (1 <= len(x) <= 63) or not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]*[a-z0-9])?', x): raise SystemExit(1)
+PY
+}
+validate_private_24(){ python3 - "$1" <<'PY'
+import ipaddress,sys
+try:
+    n=ipaddress.ip_network(sys.argv[1], strict=True)
+    ok=n.version==4 and n.prefixlen==24 and n.is_private
+except Exception:
+    ok=False
+raise SystemExit(0 if ok else 1)
+PY
+}
+derive_network_values(){ python3 - "$1" <<'PY'
+import ipaddress,sys
+n=ipaddress.ip_network(sys.argv[1])
+print(n.network_address+1)
+print(n.network_address+10)
+print(n.network_address+100)
+print(n.network_address+200)
+print(n.prefixlen)
+PY
+}
+validate_iso(){
+  local f="$1" s
+  [[ -s "$f" ]] || return 1
+  s=$(stat -c%s "$f" 2>/dev/null || echo 0)
+  (( s > 3000000000 )) || return 1
+  xorriso -indev "$f" -toc >/dev/null 2>&1
+}
+ports_ready(){
+  local ip="$1"
+  nc -z -w 2 "$ip" 53 >/dev/null 2>&1 && \
+  nc -z -w 2 "$ip" 88 >/dev/null 2>&1 && \
+  nc -z -w 2 "$ip" 389 >/dev/null 2>&1
 }
 
-# The first boot is intentionally from the no-prompt Windows installer. Change
-# only the persistent boot order immediately afterward so Windows Setup can
-# reboot from the virtual hard disk without re-entering the installer ISO.
-log 'Setting subsequent Windows reboots to the virtual hard disk...'
-bash "$INSTALL_DIR/scripts/set-next-boot-disk.sh" "$VM_NAME"
+if [[ "${1:-}" == '--status' ]]; then
+  VM_NAME="${2:-$DEFAULT_VM_NAME}"
+  if ! virsh dominfo "$VM_NAME" >/dev/null 2>&1; then die "VM not found: ${VM_NAME}"; fi
+  printf 'VM: %s\nState: %s\n' "$VM_NAME" "$(virsh domstate "$VM_NAME" | tr -d '\r')"
+  exit 0
+fi
 
-log "Windows installation is running inside ${VM_NAME}."
-log "Automatic AD readiness check started for ${DC_IP}."
+log 'Installing and validating host prerequisites...'
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y qemu-system-x86 qemu-utils libvirt-daemon-system libvirt-clients virtinst virt-manager ovmf dnsmasq-base xorriso curl python3 wimtools netcat-openbsd libosinfo-bin git
+systemctl enable --now libvirtd
+[[ -e /dev/kvm ]] || die '/dev/kvm is unavailable. Enable Intel VT-x/AMD-V in BIOS/UEFI.'
+grep -Eq '(vmx|svm)' /proc/cpuinfo || die 'CPU virtualization extensions are not visible.'
 
-READY=0
-LAST_NOTICE=0
-for ATTEMPT in $(seq 1 360); do
-  if nc -z -w 2 "$DC_IP" 389 >/dev/null 2>&1 \
-     && nc -z -w 2 "$DC_IP" 88 >/dev/null 2>&1 \
-     && nc -z -w 2 "$DC_IP" 53 >/dev/null 2>&1; then
-    READY=1
-    break
+for f in "$REPO_DIR/templates/Autounattend.xml.template" "$REPO_DIR/windows/SetupComplete.cmd" "$REPO_DIR/windows/Configure-AD.ps1"; do
+  [[ -f "$f" ]] || die "Required project file is missing: $f"
+done
+python3 - "$REPO_DIR/templates/Autounattend.xml.template" <<'PY'
+import sys,xml.etree.ElementTree as ET
+ET.parse(sys.argv[1])
+PY
+
+QEMU_USER=''
+for c in libvirt-qemu qemu; do
+  if getent passwd "$c" >/dev/null 2>&1; then QEMU_USER="$c"; break; fi
+done
+[[ -n "$QEMU_USER" ]] || die 'Could not identify the QEMU runtime account.'
+QEMU_GROUP="$(id -gn "$QEMU_USER")"
+log "QEMU runtime account: ${QEMU_USER}:${QEMU_GROUP}"
+
+mkdir -p "$BASE_DIR" "$IMAGE_DIR"
+chmod 711 "$BASE_DIR" "$IMAGE_DIR"
+
+HOST_RAM_MB=$(( $(awk '/MemTotal:/ {print $2}' /proc/meminfo) / 1024 ))
+HOST_CPUS=$(nproc)
+VM_RAM_MB=$DEFAULT_RAM_MB
+VM_VCPUS=4
+(( HOST_CPUS < VM_VCPUS )) && VM_VCPUS=$HOST_CPUS
+(( HOST_RAM_MB < 10000 )) && VM_RAM_MB=4096
+AVAILABLE_GB=$(df --output=avail -BG "$IMAGE_DIR" | tail -1 | tr -dc '0-9')
+(( AVAILABLE_GB >= 30 )) || die 'At least 30 GB of free disk space is recommended for the first build.'
+
+while true; do
+  VM_NAME="$(prompt_default 'Windows server / VM name' "$DEFAULT_VM_NAME")"
+  validate_vm_name "$VM_NAME" && break
+  warn 'Computer name must be 1-15 characters using letters, numbers, or hyphens.'
+done
+while true; do
+  DOMAIN_FQDN="$(prompt_default 'Active Directory DNS domain' "$DEFAULT_DOMAIN" | tr '[:upper:]' '[:lower:]')"
+  validate_domain "$DOMAIN_FQDN" || { warn 'Use a DNS-style lab domain such as adlab.test.'; continue; }
+  [[ "$DOMAIN_FQDN" != *.local ]] || warn '.local may conflict with multicast DNS; .test is recommended.'
+  break
+done
+DEFAULT_NETBIOS="$(printf '%s' "${DOMAIN_FQDN%%.*}" | tr '[:lower:]' '[:upper:]' | cut -c1-15)"
+while true; do
+  NETBIOS_NAME="$(prompt_default 'NetBIOS domain name' "$DEFAULT_NETBIOS" | tr '[:lower:]' '[:upper:]')"
+  validate_netbios "$NETBIOS_NAME" && break
+  warn 'NetBIOS name must be 1-15 characters using letters, numbers, or hyphens.'
+done
+while true; do
+  LAB_SUBNET="$(prompt_default 'Lab IPv4 subnet (private /24)' "$DEFAULT_SUBNET")"
+  validate_private_24 "$LAB_SUBNET" && break
+  warn 'Use a private /24 such as 192.168.77.0/24.'
+done
+while true; do
+  NETWORK_MODE="$(prompt_default 'Network mode: nat or isolated' 'nat' | tr '[:upper:]' '[:lower:]')"
+  [[ "$NETWORK_MODE" == nat || "$NETWORK_MODE" == isolated ]] && break
+  warn 'Enter nat or isolated.'
+done
+printf '\nWindows Server edition:\n  1) Standard Evaluation - Desktop Experience [recommended]\n  2) Datacenter Evaluation - Desktop Experience\n'
+read -r -p 'Choose edition [1]: ' EDITION_CHOICE
+EDITION_CHOICE="${EDITION_CHOICE:-1}"
+[[ "$EDITION_CHOICE" == 1 || "$EDITION_CHOICE" == 2 ]] || die 'Edition choice must be 1 or 2.'
+printf '\nPasswords are used only inside this local lab and are never committed to Git.\n'
+ADMIN_PASSWORD="$(read_secret_twice 'Windows/Domain Administrator password')"
+DSRM_PASSWORD="$(read_secret_twice 'Directory Services Restore Mode (DSRM) password')"
+
+mapfile -t NV < <(derive_network_values "$LAB_SUBNET")
+GATEWAY_IP="${NV[0]}"
+DC_IP="${NV[1]}"
+DHCP_START="${NV[2]}"
+DHCP_END="${NV[3]}"
+PREFIX_LEN="${NV[4]}"
+NETWORK_NAME="$DEFAULT_NETWORK_NAME"
+
+# Existing healthy labs are recognized instead of rebuilt.
+if virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
+  if ports_ready "$DC_IP"; then
+    printf '\n============================================================\n'
+    printf ' Kali-AD-Lab | LAB READY\n'
+    printf '============================================================\n'
+    printf 'VM               : %s\n' "$VM_NAME"
+    printf 'AD Domain        : %s\n' "$DOMAIN_FQDN"
+    printf 'Domain Controller: %s\n' "$DC_IP"
+    printf 'Login            : %s\\Administrator\n' "$NETBIOS_NAME"
+    printf '============================================================\n'
+    exit 0
   fi
+  warn "VM '${VM_NAME}' already exists but AD is not reachable."
+  read -r -p 'Rebuild this lab VM? [y/N]: ' REBUILD
+  [[ "$REBUILD" =~ ^[Yy]$ ]] || die 'Stopped without changing the existing VM.'
+  virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
+  virsh undefine "$VM_NAME" --nvram --remove-all-storage >/dev/null 2>&1 || virsh undefine "$VM_NAME" --remove-all-storage >/dev/null 2>&1 || true
+fi
 
-  if (( ATTEMPT - LAST_NOTICE >= 6 )); then
-    STATE="$(virsh domstate "$VM_NAME" 2>/dev/null | tr -d '\r' || true)"
-    log "Still configuring Windows/AD... VM state: ${STATE:-unknown}"
-    LAST_NOTICE=$ATTEMPT
+# Network collision check against host routes and existing libvirt networks.
+CONFLICTS="$(python3 - "$LAB_SUBNET" "$NETWORK_NAME" <<'PY'
+import ipaddress,subprocess,sys,xml.etree.ElementTree as ET
+wanted=ipaddress.ip_network(sys.argv[1]); reuse=sys.argv[2]; hits=[]
+try:
+    for line in subprocess.check_output(['ip','-o','-4','route','show'],text=True,stderr=subprocess.DEVNULL).splitlines():
+        p=line.split()[0]
+        if p=='default': continue
+        try: n=ipaddress.ip_network(p,strict=False)
+        except Exception: continue
+        if wanted.overlaps(n): hits.append('host:'+str(n))
+except Exception: pass
+try:
+    for name in subprocess.check_output(['virsh','net-list','--all','--name'],text=True,stderr=subprocess.DEVNULL).split():
+        if name==reuse: continue
+        try:
+            r=ET.fromstring(subprocess.check_output(['virsh','net-dumpxml',name],text=True,stderr=subprocess.DEVNULL))
+            for node in r.findall('ip'):
+                a=node.get('address'); m=node.get('netmask') or node.get('prefix')
+                if a and m:
+                    n=ipaddress.ip_network(f'{a}/{m}',strict=False)
+                    if wanted.overlaps(n): hits.append(name+':'+str(n))
+        except Exception: pass
+except Exception: pass
+print('\n'.join(hits))
+PY
+)"
+[[ -z "$CONFLICTS" ]] || die "Requested subnet overlaps another network:\n${CONFLICTS}"
+
+# Create or validate the libvirt lab network.
+if virsh net-info "$NETWORK_NAME" >/dev/null 2>&1; then
+  EXISTING_CIDR="$(python3 - "$NETWORK_NAME" <<'PY'
+import ipaddress,subprocess,sys,xml.etree.ElementTree as ET
+r=ET.fromstring(subprocess.check_output(['virsh','net-dumpxml',sys.argv[1]],text=True))
+n=r.find('ip'); print(ipaddress.ip_network(f"{n.get('address')}/{n.get('netmask') or n.get('prefix')}",strict=False))
+PY
+)"
+  [[ "$EXISTING_CIDR" == "$LAB_SUBNET" ]] || die "Existing ${NETWORK_NAME} uses ${EXISTING_CIDR}, not ${LAB_SUBNET}."
+  virsh net-start "$NETWORK_NAME" >/dev/null 2>&1 || true
+else
+  NET_XML="$(mktemp /tmp/kali-adlab-net.XXXXXX.xml)"
+  if [[ "$NETWORK_MODE" == nat ]]; then FORWARD_XML="<forward mode='nat'/>"; else FORWARD_XML=''; fi
+  cat > "$NET_XML" <<EOF
+<network>
+  <name>${NETWORK_NAME}</name>
+  ${FORWARD_XML}
+  <domain name='${DOMAIN_FQDN}' localOnly='yes'/>
+  <ip address='${GATEWAY_IP}' netmask='255.255.255.0'>
+    <dhcp><range start='${DHCP_START}' end='${DHCP_END}'/></dhcp>
+  </ip>
+</network>
+EOF
+  virsh net-define "$NET_XML" >/dev/null
+  virsh net-start "$NETWORK_NAME" >/dev/null
+  virsh net-autostart "$NETWORK_NAME" >/dev/null
+  rm -f "$NET_XML"
+fi
+
+# Download the official Microsoft source media once.
+if validate_iso "$SOURCE_ISO"; then
+  log 'Using cached Microsoft Windows Server 2025 source ISO.'
+else
+  rm -f "$SOURCE_ISO"
+  log 'Downloading Windows Server 2025 Evaluation ISO from Microsoft...'
+  curl -fL --retry 5 --retry-delay 3 --connect-timeout 30 --progress-bar "$WINDOWS_ISO_URL" -o "$SOURCE_ISO"
+  validate_iso "$SOURCE_ISO" || { rm -f "$SOURCE_ISO"; die 'Downloaded Microsoft ISO failed validation.'; }
+  chmod 644 "$SOURCE_ISO"
+fi
+
+# Build fingerprint changes only when Windows bootstrap content changes.
+BUILD_ID="$( { printf '%s\n' "$MEDIA_VERSION"; sha256sum "$REPO_DIR/windows/SetupComplete.cmd" "$REPO_DIR/windows/Configure-AD.ps1"; } | sha256sum | awk '{print $1}')"
+if validate_iso "$INSTALL_ISO" && [[ "$(cat "$MEDIA_META" 2>/dev/null || true)" == "$BUILD_ID" ]]; then
+  log 'Using cached unattended Windows installer.'
+else
+  log 'Building unattended no-prompt Windows installer (one-time operation)...'
+  WORK_DIR="$(mktemp -d /var/tmp/kali-adlab-media.XXXXXX)"
+  MOUNT_DIR="$WORK_DIR/mnt"
+  TREE_DIR="$WORK_DIR/tree"
+  PARTIAL="${INSTALL_ISO}.partial"
+  mkdir -p "$MOUNT_DIR" "$TREE_DIR"
+  cleanup_media(){
+    mountpoint -q "$MOUNT_DIR" 2>/dev/null && umount "$MOUNT_DIR" || true
+    rm -rf "$WORK_DIR"
+    rm -f "$PARTIAL"
+  }
+  trap cleanup_media RETURN
+  mount -o loop,ro "$SOURCE_ISO" "$MOUNT_DIR"
+  [[ -f "$MOUNT_DIR/boot/etfsboot.com" ]] || die 'Microsoft ISO is missing BIOS boot image.'
+  [[ -f "$MOUNT_DIR/efi/microsoft/boot/efisys_noprompt.bin" ]] || die 'Microsoft ISO is missing no-prompt UEFI boot image.'
+  cp -a "$MOUNT_DIR/." "$TREE_DIR/"
+  umount "$MOUNT_DIR"
+  OEM_DIR="$TREE_DIR/sources/\$OEM\$"
+  mkdir -p "$OEM_DIR/\$1/ADLab" "$OEM_DIR/\$\$/Setup/Scripts"
+  cp "$REPO_DIR/windows/Configure-AD.ps1" "$OEM_DIR/\$1/ADLab/Configure-AD.ps1"
+  cp "$REPO_DIR/windows/SetupComplete.cmd" "$OEM_DIR/\$\$/Setup/Scripts/SetupComplete.cmd"
+  printf '%s\n' "$MEDIA_VERSION" > "$OEM_DIR/\$1/ADLab/media-version.txt"
+  rm -f "$PARTIAL"
+  xorriso -as mkisofs -iso-level 3 -J -joliet-long -R -V "$MEDIA_VERSION" \
+    -b boot/etfsboot.com -no-emul-boot -boot-load-size 8 -boot-info-table \
+    -eltorito-alt-boot -e efi/microsoft/boot/efisys_noprompt.bin -no-emul-boot \
+    -o "$PARTIAL" "$TREE_DIR"
+  validate_iso "$PARTIAL" || die 'Generated unattended ISO failed validation.'
+  mv -f "$PARTIAL" "$INSTALL_ISO"
+  chmod 644 "$INSTALL_ISO"
+  printf '%s\n' "$BUILD_ID" > "$MEDIA_META"
+  chmod 644 "$MEDIA_META"
+  rm -rf "$WORK_DIR"
+  trap - RETURN
+  log 'Unattended Windows installer is ready.'
+fi
+
+# Inspect editions in the prepared media.
+ISO_MOUNT="$(mktemp -d /tmp/kali-adlab-wim.XXXXXX)"
+mount -o loop,ro "$INSTALL_ISO" "$ISO_MOUNT"
+WIM_PATH=''
+[[ -f "$ISO_MOUNT/sources/install.wim" ]] && WIM_PATH="$ISO_MOUNT/sources/install.wim"
+[[ -f "$ISO_MOUNT/sources/install.esd" ]] && WIM_PATH="$ISO_MOUNT/sources/install.esd"
+[[ -n "$WIM_PATH" ]] || die 'Windows media has no install.wim/install.esd.'
+wiminfo "$WIM_PATH" > "${BASE_DIR}/windows-images.txt"
+if [[ "$EDITION_CHOICE" == 1 ]]; then
+  IMAGE_INDEX=$(awk 'BEGIN{IGNORECASE=1} /^Index:/ {i=$2} /^(Name|Display Name):/ && /Standard/ && /Desktop Experience/ {print i; exit}' "${BASE_DIR}/windows-images.txt")
+  IMAGE_INDEX="${IMAGE_INDEX:-2}"
+  EDITION_LABEL='Standard Evaluation - Desktop Experience'
+else
+  IMAGE_INDEX=$(awk 'BEGIN{IGNORECASE=1} /^Index:/ {i=$2} /^(Name|Display Name):/ && /Datacenter/ && /Desktop Experience/ {print i; exit}' "${BASE_DIR}/windows-images.txt")
+  IMAGE_INDEX="${IMAGE_INDEX:-4}"
+  EDITION_LABEL='Datacenter Evaluation - Desktop Experience'
+fi
+umount "$ISO_MOUNT"; rmdir "$ISO_MOUNT"
+
+# Build the small per-deployment secret/config media.
+RUNTIME_DIR="${BASE_DIR}/runtime-${VM_NAME}"
+MEDIA_DIR="${RUNTIME_DIR}/media"
+CONFIG_ISO="${BASE_DIR}/${VM_NAME}-LABCONFIG.iso"
+rm -rf "$RUNTIME_DIR"; mkdir -p "$MEDIA_DIR/ADLab"; chmod 700 "$RUNTIME_DIR" "$MEDIA_DIR" "$MEDIA_DIR/ADLab"
+DSRM_B64="$(printf '%s' "$DSRM_PASSWORD" | base64 -w0)"
+cat > "$MEDIA_DIR/ADLab/config.ps1" <<EOF
+\$LabConfig = @{ VmName='${VM_NAME}'; DomainFqdn='${DOMAIN_FQDN}'; NetbiosName='${NETBIOS_NAME}'; DcIp='${DC_IP}'; PrefixLength=${PREFIX_LEN}; Gateway='${GATEWAY_IP}'; NetworkMode='${NETWORK_MODE}'; DsrmPasswordB64='${DSRM_B64}' }
+EOF
+chmod 600 "$MEDIA_DIR/ADLab/config.ps1"
+ADMIN_PASSWORD="$ADMIN_PASSWORD" python3 - "$REPO_DIR/templates/Autounattend.xml.template" "$MEDIA_DIR/Autounattend.xml" "$VM_NAME" "$IMAGE_INDEX" <<'PY'
+import html,os,pathlib,sys
+s=pathlib.Path(sys.argv[1]).read_text()
+s=s.replace('@@VM_NAME@@',html.escape(sys.argv[3]))
+s=s.replace('@@IMAGE_INDEX@@',html.escape(sys.argv[4]))
+s=s.replace('@@ADMIN_PASSWORD_XML@@',html.escape(os.environ['ADMIN_PASSWORD']))
+pathlib.Path(sys.argv[2]).write_text(s)
+PY
+chmod 600 "$MEDIA_DIR/Autounattend.xml"
+rm -f "$CONFIG_ISO"
+xorriso -as mkisofs -quiet -V LABCONFIG -J -R -o "$CONFIG_ISO" "$MEDIA_DIR"
+chown "$QEMU_USER:$QEMU_GROUP" "$CONFIG_ISO"; chmod 600 "$CONFIG_ISO"
+unset ADMIN_PASSWORD DSRM_PASSWORD DSRM_B64
+find "$RUNTIME_DIR" -type f -exec shred -u {} + 2>/dev/null || true
+rm -rf "$RUNTIME_DIR"
+
+DISK_PATH="${IMAGE_DIR}/${VM_NAME}.qcow2"
+rm -f "$DISK_PATH"
+qemu-img create -f qcow2 "$DISK_PATH" "${DEFAULT_DISK_GB}G" >/dev/null
+chown "$QEMU_USER:$QEMU_GROUP" "$DISK_PATH"; chmod 600 "$DISK_PATH"
+runuser -u "$QEMU_USER" -- sh -c "test -r '$INSTALL_ISO' && test -r '$CONFIG_ISO' && test -r '$DISK_PATH' && test -w '$DISK_PATH'" || die 'QEMU cannot access generated media/storage.'
+
+OS_VARIANT='win2k22'
+osinfo-query os --fields=short-id 2>/dev/null | grep -q win2k25 && OS_VARIANT='win2k25'
+cat <<EOF
+
+---------------- Deployment plan ----------------
+VM               : ${VM_NAME}
+Windows edition  : ${EDITION_LABEL}
+AD domain        : ${DOMAIN_FQDN} (${NETBIOS_NAME})
+Lab network      : ${NETWORK_NAME} / ${LAB_SUBNET}
+Network mode     : ${NETWORK_MODE}
+Domain Controller: ${DC_IP}
+Resources        : ${VM_RAM_MB} MB RAM, ${VM_VCPUS} vCPU, ${DEFAULT_DISK_GB} GB disk
+-------------------------------------------------
+EOF
+
+log 'Creating and starting Windows Server...'
+if ! virt-install --connect qemu:///system --name "$VM_NAME" --memory "$VM_RAM_MB" --vcpus "$VM_VCPUS" --cpu host-passthrough --machine q35 --boot uefi \
+  --disk "path=${DISK_PATH},format=qcow2,bus=sata,cache=none,discard=unmap" \
+  --cdrom "$INSTALL_ISO" --disk "path=${CONFIG_ISO},device=cdrom,bus=sata,readonly=on" \
+  --network "network=${NETWORK_NAME},model=e1000e" --graphics spice,listen=127.0.0.1 --video vga --os-variant "$OS_VARIANT" --noautoconsole; then
+  virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
+  virsh undefine "$VM_NAME" --nvram >/dev/null 2>&1 || virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
+  rm -f "$DISK_PATH"
+  die 'VM creation failed; the partial VM was cleaned up.'
+fi
+
+# The live first boot is already from the installer. Change only the persistent
+# next-boot order so all Windows reboots prefer the installed virtual disk.
+BOOT_XML="$(mktemp /tmp/kali-adlab-boot.XXXXXX.xml)"
+virsh dumpxml --inactive "$VM_NAME" > "$BOOT_XML"
+python3 - "$BOOT_XML" <<'PY'
+import sys,xml.etree.ElementTree as ET
+p=sys.argv[1]; t=ET.parse(p); r=t.getroot(); osn=r.find('os')
+if osn is not None:
+    for b in list(osn.findall('boot')): osn.remove(b)
+dev=r.find('devices')
+if dev is None: raise SystemExit('VM XML has no devices')
+for n in dev:
+    b=n.find('boot')
+    if b is not None: n.remove(b)
+hd=None; cds=[]
+for d in dev.findall('disk'):
+    if d.get('device')=='disk' and hd is None: hd=d
+    elif d.get('device')=='cdrom': cds.append(d)
+if hd is None: raise SystemExit('Virtual hard disk not found')
+ET.SubElement(hd,'boot',{'order':'1'})
+for i,d in enumerate(cds,2): ET.SubElement(d,'boot',{'order':str(i)})
+t.write(p,encoding='unicode')
+PY
+virsh define "$BOOT_XML" >/dev/null
+rm -f "$BOOT_XML"
+log 'First boot: unattended Windows media. Subsequent boots: virtual hard disk.'
+
+# Keep the terminal attached to the outcome. Automatically recover a bounded
+# number of unexpected power-offs so the user never has to press Start manually.
+log 'Windows installation and AD configuration are now fully automatic.'
+log "Waiting for DNS/Kerberos/LDAP on ${DC_IP} (up to $((MAX_WAIT_SECONDS/60)) minutes)..."
+START_TS=$(date +%s)
+LAST_NOTICE=0
+SHUTOFF_STREAK=0
+AUTO_STARTS=0
+READY=0
+while (( $(date +%s) - START_TS < MAX_WAIT_SECONDS )); do
+  if ports_ready "$DC_IP"; then READY=1; break; fi
+  STATE="$(virsh domstate "$VM_NAME" 2>/dev/null | tr -d '\r' || true)"
+  if [[ "$STATE" == 'shut off' ]]; then
+    ((SHUTOFF_STREAK+=1))
+    if (( SHUTOFF_STREAK >= 3 && AUTO_STARTS < 4 )); then
+      log "VM is powered off during deployment; automatically starting it (recovery $((AUTO_STARTS+1))/4)..."
+      virsh start "$VM_NAME" >/dev/null || true
+      ((AUTO_STARTS+=1)); SHUTOFF_STREAK=0
+    fi
+  else
+    SHUTOFF_STREAK=0
+  fi
+  NOW=$(date +%s)
+  if (( NOW - LAST_NOTICE >= 60 )); then
+    ELAPSED=$(( (NOW-START_TS)/60 ))
+    log "Still configuring Windows/AD... ${ELAPSED} min elapsed; VM state: ${STATE:-unknown}"
+    LAST_NOTICE=$NOW
   fi
   sleep 10
 done
 
 if (( READY == 0 )); then
-  printf '\n============================================================\n'
-  printf ' Kali-AD-Lab | AUTOMATION NEEDS ATTENTION\n'
-  printf '============================================================\n'
-  printf 'VM     : %s\n' "$VM_NAME"
-  printf 'Domain : %s\n' "$DOMAIN_FQDN"
-  printf 'DC IP  : %s\n' "$DC_IP"
-  printf '\nThe VM was created, but AD services did not become reachable.\n'
-  printf 'Open Virtual Machine Manager and inspect %s.\n' "$VM_NAME"
-  printf '============================================================\n'
+  warn 'AD services did not become reachable within the expected window.'
+  warn "VM state: $(virsh domstate "$VM_NAME" 2>/dev/null | tr -d '\r' || echo unknown)"
+  warn "The VM and config media have been left intact for recovery. Log: ${RUN_LOG}"
   exit 1
 fi
 
+log 'AD services are reachable. Performing final stabilization check...'
 sleep 30
+ports_ready "$DC_IP" || die 'AD services became unavailable during final validation.'
 
-NETBIOS="$(printf '%s' "${DOMAIN_FQDN%%.*}" | tr '[:lower:]' '[:upper:]' | cut -c1-15)"
+# Eject and destroy secret-bearing config media only after AD is healthy.
+CONFIG_TARGET="$(virsh domblklist "$VM_NAME" --details 2>/dev/null | awk -v src="$CONFIG_ISO" '$1=="file" && $2=="cdrom" && $4==src {print $3; exit}')"
+if [[ -n "$CONFIG_TARGET" ]]; then
+  virsh change-media "$VM_NAME" "$CONFIG_TARGET" --eject --live --force >/dev/null 2>&1 || true
+  virsh change-media "$VM_NAME" "$CONFIG_TARGET" --eject --config --force >/dev/null 2>&1 || true
+fi
+shred -u "$CONFIG_ISO" 2>/dev/null || rm -f "$CONFIG_ISO"
 
 printf '\n============================================================\n'
 printf ' Kali-AD-Lab | LAB READY\n'
@@ -132,6 +489,9 @@ printf '============================================================\n'
 printf 'VM               : %s\n' "$VM_NAME"
 printf 'AD Domain        : %s\n' "$DOMAIN_FQDN"
 printf 'Domain Controller: %s\n' "$DC_IP"
-printf 'Login            : %s\\Administrator\n' "$NETBIOS"
-printf '\nOpen Virtual Machine Manager and open %s to use Windows.\n' "$VM_NAME"
+printf 'DNS              : READY\n'
+printf 'Kerberos         : READY\n'
+printf 'LDAP             : READY\n'
+printf 'Login            : %s\\Administrator\n' "$NETBIOS_NAME"
+printf 'Run log          : %s\n' "$RUN_LOG"
 printf '============================================================\n'
