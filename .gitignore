@@ -1,0 +1,24 @@
+# Runtime/generated artifacts
+.runtime/
+build/
+*.iso
+*.qcow2
+*.img
+*.vhd
+*.vhdx
+*.log
+
+# Generated unattended configuration / secrets
+Autounattend.xml
+config.ps1
+*.secret
+*.credentials
+
+# Local overrides
+.env
+config/local.env
+
+# Editor/OS
+.vscode/
+.idea/
+.DS_Store
