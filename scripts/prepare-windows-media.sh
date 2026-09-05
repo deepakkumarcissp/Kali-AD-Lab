@@ -6,6 +6,8 @@ SOURCE_ISO="${BASE_DIR}/Windows_Server_2025_Evaluation_x64_source.iso"
 INSTALL_ISO="${BASE_DIR}/Windows_Server_2025_Evaluation_x64.iso"
 WINDOWS_ISO_URL="https://aka.ms/WinServ2025iso-enus"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+EXPECTED_LABEL='WS25_ADLAB_V2'
 
 log(){ printf '[Kali-AD-Lab] %s\n' "$*"; }
 die(){ printf '[Kali-AD-Lab] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -32,10 +34,10 @@ volume_id(){
   xorriso -indev "$1" -pvd_info 2>/dev/null | awk -F"'" '/Volume id/ {print $2; exit}'
 }
 
-# Migrate an older cached Microsoft ISO into the new source-cache location.
+# Migrate an older cached Microsoft ISO into the source-cache location.
 if [[ ! -f "$SOURCE_ISO" && -f "$INSTALL_ISO" ]]; then
   VID="$(volume_id "$INSTALL_ISO" || true)"
-  if [[ "$VID" != "WS2025_NOPROMPT" ]]; then
+  if [[ "$VID" != "$EXPECTED_LABEL" ]]; then
     log 'Preserving existing Microsoft ISO as source media...'
     mv "$INSTALL_ISO" "$SOURCE_ISO"
   fi
@@ -50,12 +52,26 @@ if ! validate_iso "$SOURCE_ISO"; then
   chmod 644 "$SOURCE_ISO"
 fi
 
-# Build or refresh the installer used by setup.sh. It uses Microsoft's
-# efisys_noprompt.bin so UEFI boots Windows Setup without any keypress.
-if ! validate_iso "$INSTALL_ISO" || [[ "$SOURCE_ISO" -nt "$INSTALL_ISO" ]] || [[ "$(volume_id "$INSTALL_ISO" || true)" != "WS2025_NOPROMPT" ]]; then
+NEEDS_REBUILD=0
+if ! validate_iso "$INSTALL_ISO" || [[ "$(volume_id "$INSTALL_ISO" || true)" != "$EXPECTED_LABEL" ]] || [[ "$SOURCE_ISO" -nt "$INSTALL_ISO" ]]; then
+  NEEDS_REBUILD=1
+fi
+
+for f in \
+  "$SCRIPT_DIR/build-noprompt-windows-iso.sh" \
+  "$REPO_DIR/windows/SetupComplete.cmd" \
+  "$REPO_DIR/windows/Stage1.ps1" \
+  "$REPO_DIR/windows/Stage2.ps1" \
+  "$REPO_DIR/windows/Stage3.ps1"; do
+  [[ -f "$f" ]] || die "Required media/bootstrap file is missing: $f"
+  [[ ! -f "$INSTALL_ISO" || "$f" -nt "$INSTALL_ISO" ]] && NEEDS_REBUILD=1
+done
+
+if (( NEEDS_REBUILD == 1 )); then
   rm -f "$INSTALL_ISO"
   bash "$SCRIPT_DIR/build-noprompt-windows-iso.sh" "$SOURCE_ISO" "$INSTALL_ISO"
 fi
 
 validate_iso "$INSTALL_ISO" || die 'Prepared Windows installer failed validation.'
-log 'No-prompt Windows installer is ready before VM startup.'
+[[ "$(volume_id "$INSTALL_ISO" || true)" == "$EXPECTED_LABEL" ]] || die 'Prepared Windows installer has the wrong media version.'
+log 'Unattended Windows installer is ready before VM startup.'
