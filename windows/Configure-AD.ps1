@@ -16,6 +16,25 @@ function Stop-TranscriptSafe {
     try { Stop-Transcript | Out-Null } catch {}
 }
 
+function Wait-WindowsSetupComplete {
+    Write-Host '[Configure-AD] Waiting for Windows Setup/OOBE to finish before configuring AD...'
+    for ($i = 0; $i -lt 180; $i++) {
+        $setup = Get-ItemProperty 'HKLM:\SYSTEM\Setup' -ErrorAction SilentlyContinue
+        $systemSetup = 0
+        $oobe = 0
+        if ($null -ne $setup) {
+            if ($null -ne $setup.SystemSetupInProgress) { $systemSetup = [int]$setup.SystemSetupInProgress }
+            if ($null -ne $setup.OOBEInProgress) { $oobe = [int]$setup.OOBEInProgress }
+        }
+        if ($systemSetup -eq 0 -and $oobe -eq 0) {
+            Write-Host '[Configure-AD] Windows Setup is complete.'
+            return
+        }
+        Start-Sleep -Seconds 10
+    }
+    throw 'Windows Setup/OOBE did not complete within 30 minutes.'
+}
+
 function Get-PrimaryAdapter {
     for ($i = 0; $i -lt 24; $i++) {
         $a = Get-NetAdapter -ErrorAction SilentlyContinue |
@@ -126,6 +145,7 @@ Completed: $(Get-Date -Format o)
 }
 
 try {
+    Wait-WindowsSetupComplete
     Start-Sleep -Seconds 15
 
     $attempt = 0
