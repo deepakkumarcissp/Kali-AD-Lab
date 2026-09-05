@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-REPO_URL="https://github.com/deepakkumarcissp/Kali-AD-Lab.git"
-INSTALL_DIR="/opt/Kali-AD-Lab"
+REPO_URL='https://github.com/deepakkumarcissp/Kali-AD-Lab.git'
+INSTALL_DIR='/opt/Kali-AD-Lab'
 
 if [[ ${EUID} -ne 0 ]]; then
   exec sudo -E bash
 fi
 
 printf '\n============================================================\n'
-printf ' Kali-AD-Lab | One-command launcher\n'
+printf ' Kali-AD-Lab | One-command installer\n'
 printf '============================================================\n\n'
 
 if ! command -v git >/dev/null 2>&1; then
@@ -23,15 +23,15 @@ if [[ -d "${INSTALL_DIR}/.git" ]]; then
   git -C "$INSTALL_DIR" reset --hard origin/main
 else
   if [[ -e "$INSTALL_DIR" ]]; then
-    printf 'ERROR: %s exists but is not a Kali-AD-Lab Git checkout.\n' "$INSTALL_DIR" >&2
+    printf 'ERROR: %s already exists and is not a Kali-AD-Lab checkout.\n' "$INSTALL_DIR" >&2
     exit 1
   fi
   printf '[Kali-AD-Lab] Installing into %s...\n' "$INSTALL_DIR"
   git clone "$REPO_URL" "$INSTALL_DIR"
 fi
 
-chmod +x "$INSTALL_DIR/kali-ad-lab" "$INSTALL_DIR/setup.sh"
+chmod +x "$INSTALL_DIR/kali-ad-lab" "$INSTALL_DIR/scripts/destroy-lab.sh" 2>/dev/null || true
 ln -sf "$INSTALL_DIR/kali-ad-lab" /usr/local/bin/kali-ad-lab
 
-printf '[Kali-AD-Lab] Launcher installed as: kali-ad-lab\n\n'
+printf '[Kali-AD-Lab] Starting deployment...\n\n'
 exec "$INSTALL_DIR/kali-ad-lab"
