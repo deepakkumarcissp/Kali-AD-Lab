@@ -50,7 +50,7 @@ else
   fi
 fi
 
-chmod +x "$INSTALL_DIR/setup.sh" "$INSTALL_DIR/kali-ad-lab"
+chmod +x "$INSTALL_DIR/setup.sh" "$INSTALL_DIR/kali-ad-lab" "$INSTALL_DIR/scripts/auto-boot-windows.sh"
 ln -sf "$INSTALL_DIR/kali-ad-lab" /usr/local/bin/kali-ad-lab 2>/dev/null || true
 
 RUN_LOG="$(mktemp /tmp/kali-ad-lab-run.XXXXXX.log)"
@@ -74,18 +74,10 @@ DC_IP="$(awk -F': ' '/^DC IP: /{v=$2} END{print v}' "$RUN_LOG")"
   exit 0
 }
 
-# Windows installation media can display "Press any key to boot from CD or DVD".
-# Send SPACE repeatedly during the short UEFI/DVD boot window so no console click
-# or manual keypress is required. This happens immediately after VM creation and
-# stops before Windows Setup reaches its interactive stages.
-log 'Triggering unattended Windows DVD boot...'
-for _ in $(seq 1 20); do
-  STATE="$(virsh domstate "$VM_NAME" 2>/dev/null | tr -d '\r' || true)"
-  if [[ "$STATE" == *running* ]]; then
-    virsh send-key "$VM_NAME" KEY_SPACE >/dev/null 2>&1 || true
-  fi
-  sleep 0.4
-done
+# Handle both possible early-boot states automatically:
+# 1) OVMF/UEFI boot-device menu, and
+# 2) Windows "Press any key to boot from CD or DVD" prompt.
+bash "$INSTALL_DIR/scripts/auto-boot-windows.sh" "$VM_NAME"
 
 log "Windows installation is running inside ${VM_NAME}."
 log "Automatic AD readiness check started for ${DC_IP}."
