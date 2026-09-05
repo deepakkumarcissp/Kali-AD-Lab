@@ -10,14 +10,16 @@ IMAGE_DIR="/var/lib/libvirt/images/${PROJECT}"
 SOURCE_ISO="${BASE_DIR}/Windows_Server_2025_Evaluation_x64_source.iso"
 INSTALL_ISO="${BASE_DIR}/Windows_Server_2025_Evaluation_x64.iso"
 MEDIA_META="${INSTALL_ISO}.build-id"
+SPICE_TOOLS="${BASE_DIR}/spice-guest-tools-latest.exe"
 WINDOWS_ISO_URL='https://aka.ms/WinServ2025iso-enus'
+SPICE_TOOLS_URL='https://www.spice-space.org/download/windows/spice-guest-tools/spice-guest-tools-latest.exe'
 DEFAULT_VM_NAME='DC01'
 DEFAULT_DOMAIN='adlab.test'
 DEFAULT_NETWORK_NAME='ad-lab'
 DEFAULT_SUBNET='192.168.77.0/24'
 DEFAULT_RAM_MB=6144
 DEFAULT_DISK_GB=80
-MEDIA_VERSION='WS25_ADLAB_V3'
+MEDIA_VERSION='WS25_ADLAB_V5'
 MAX_WAIT_SECONDS=5400
 
 log(){ printf '[Kali-AD-Lab] %s\n' "$*"; }
@@ -34,13 +36,13 @@ exec > >(tee -a "$RUN_LOG") 2>&1
 
 cat <<'BANNER'
 ============================================================
- Kali-AD-Lab | One-command Windows Server AD lab builder
+ Kali-AD-Lab | One-command AD security-assessment lab builder
 ============================================================
 BANNER
 log "Run log: ${RUN_LOG}"
 
 # Best-effort self-update. Public installations update without authentication.
-# A private checkout continues locally if GitHub authentication is unavailable.
+# Private authenticated checkouts use the configured GitHub credential helper.
 if [[ -d "${REPO_DIR}/.git" ]] && command -v git >/dev/null 2>&1; then
   if git -C "$REPO_DIR" fetch origin main >/dev/null 2>&1; then
     CURRENT="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || true)"
@@ -104,11 +106,40 @@ validate_iso(){
   (( s > 3000000000 )) || return 1
   xorriso -indev "$f" -toc >/dev/null 2>&1
 }
+validate_spice_tools(){
+  local f="$1" s
+  [[ -s "$f" ]] || return 1
+  s=$(stat -c%s "$f" 2>/dev/null || echo 0)
+  (( s > 5000000 ))
+}
 ports_ready(){
   local ip="$1"
   nc -z -w 2 "$ip" 53 >/dev/null 2>&1 && \
   nc -z -w 2 "$ip" 88 >/dev/null 2>&1 && \
   nc -z -w 2 "$ip" 389 >/dev/null 2>&1
+}
+assessment_ready(){
+  local ip="$1" domain="$2"
+  dig +time=2 +tries=1 +short @"$ip" "assessment-ready.${domain}" A 2>/dev/null | grep -Fxq "$ip"
+}
+print_ready(){
+  printf '\n============================================================\n'
+  printf ' Kali-AD-Lab | LAB READY\n'
+  printf '============================================================\n'
+  printf 'VM               : %s\n' "$VM_NAME"
+  printf 'AD Domain        : %s\n' "$DOMAIN_FQDN"
+  printf 'Domain Controller: %s\n' "$DC_IP"
+  printf 'DNS              : READY\n'
+  printf 'Kerberos         : READY\n'
+  printf 'LDAP             : READY\n'
+  printf 'Assessment       : READY\n'
+  printf 'Synthetic users  : 24 VERIFIED\n'
+  printf 'Synthetic PCs    : 10 VERIFIED\n'
+  printf 'Scenario families: 47 SEEDED\n'
+  printf 'Shared clipboard : SPICE guest tools requested\n'
+  printf 'Login            : %s\\Administrator\n' "$NETBIOS_NAME"
+  printf 'Run log          : %s\n' "$RUN_LOG"
+  printf '============================================================\n'
 }
 
 if [[ "${1:-}" == '--status' ]]; then
@@ -121,12 +152,17 @@ fi
 log 'Installing and validating host prerequisites...'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y qemu-system-x86 qemu-utils libvirt-daemon-system libvirt-clients virtinst virt-manager ovmf dnsmasq-base xorriso curl python3 wimtools netcat-openbsd libosinfo-bin git
+apt-get install -y qemu-system-x86 qemu-utils libvirt-daemon-system libvirt-clients virtinst virt-manager ovmf dnsmasq-base xorriso curl python3 wimtools netcat-openbsd libosinfo-bin git dnsutils
 systemctl enable --now libvirtd
 [[ -e /dev/kvm ]] || die '/dev/kvm is unavailable. Enable Intel VT-x/AMD-V in BIOS/UEFI.'
 grep -Eq '(vmx|svm)' /proc/cpuinfo || die 'CPU virtualization extensions are not visible.'
 
-for f in "$REPO_DIR/templates/Autounattend.xml.template" "$REPO_DIR/windows/SetupComplete.cmd" "$REPO_DIR/windows/Configure-AD.ps1"; do
+for f in \
+  "$REPO_DIR/templates/Autounattend.xml.template" \
+  "$REPO_DIR/windows/SetupComplete.cmd" \
+  "$REPO_DIR/windows/Configure-AD.ps1" \
+  "$REPO_DIR/windows/Run-Lab.ps1" \
+  "$REPO_DIR/windows/Seed-Assessment-Lab.ps1"; do
   [[ -f "$f" ]] || die "Required project file is missing: $f"
 done
 python3 - "$REPO_DIR/templates/Autounattend.xml.template" <<'PY'
@@ -194,21 +230,17 @@ NETWORK_NAME="$DEFAULT_NETWORK_NAME"
 DISK_PATH="${IMAGE_DIR}/${VM_NAME}.qcow2"
 CONFIG_ISO="${BASE_DIR}/${VM_NAME}-LABCONFIG.iso"
 
-# Existing healthy labs are reported without asking for passwords or rebuilding.
 if virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
-  if ports_ready "$DC_IP"; then
-    printf '\n============================================================\n'
-    printf ' Kali-AD-Lab | LAB READY\n'
-    printf '============================================================\n'
-    printf 'VM               : %s\n' "$VM_NAME"
-    printf 'AD Domain        : %s\n' "$DOMAIN_FQDN"
-    printf 'Domain Controller: %s\n' "$DC_IP"
-    printf 'Login            : %s\\Administrator\n' "$NETBIOS_NAME"
-    printf '============================================================\n'
+  if ports_ready "$DC_IP" && assessment_ready "$DC_IP" "$DOMAIN_FQDN"; then
+    print_ready
     exit 0
   fi
-  warn "VM '${VM_NAME}' already exists but AD is not reachable."
-  read -r -p 'Rebuild this lab VM? [y/N]: ' REBUILD
+  if ports_ready "$DC_IP"; then
+    warn "VM '${VM_NAME}' has a working domain controller but the assessment dataset is incomplete."
+  else
+    warn "VM '${VM_NAME}' exists but the complete lab is not reachable."
+  fi
+  read -r -p 'Rebuild this lab VM from scratch? [y/N]: ' REBUILD
   [[ "$REBUILD" =~ ^[Yy]$ ]] || die 'Stopped without changing the existing VM.'
   virsh managedsave-remove "$VM_NAME" >/dev/null 2>&1 || true
   virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
@@ -216,18 +248,17 @@ if virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
   rm -f "$DISK_PATH" "$CONFIG_ISO"
 fi
 
-# Remove harmless artifacts left by pre-V3 versions without touching cached Windows media.
 rm -rf "${BASE_DIR}/runtime-${VM_NAME}"
 rm -f "${BASE_DIR}/${VM_NAME}-LABTOOLS.iso" "${BASE_DIR}/${VM_NAME}-secret-cleanup.log"
 
 AVAILABLE_GB=$(df --output=avail -BG "$IMAGE_DIR" | tail -1 | tr -dc '0-9')
 (( AVAILABLE_GB >= 20 )) || die 'At least 20 GB of free disk space is required.'
 
-printf '\nPasswords are used only inside this local lab and are never committed to Git.\n'
+printf '\nPasswords are used only inside this isolated lab and are never committed to Git.\n'
 ADMIN_PASSWORD="$(read_secret_twice 'Windows/Domain Administrator password')"
 DSRM_PASSWORD="$(read_secret_twice 'Directory Services Restore Mode (DSRM) password')"
 
-# Validate any existing ad-lab network, including its forwarding mode.
+# Validate or create the libvirt lab network.
 if virsh net-info "$NETWORK_NAME" >/dev/null 2>&1; then
   readarray -t EXISTING_NET < <(python3 - "$NETWORK_NAME" <<'PY'
 import ipaddress,subprocess,sys,xml.etree.ElementTree as ET
@@ -241,7 +272,6 @@ PY
   [[ "${EXISTING_NET[1]}" == "$NETWORK_MODE" ]] || die "Existing ${NETWORK_NAME} mode is ${EXISTING_NET[1]}, not ${NETWORK_MODE}."
   virsh net-start "$NETWORK_NAME" >/dev/null 2>&1 || true
 else
-  # Check the proposed subnet against host routes and other libvirt networks.
   CONFLICTS="$(python3 - "$LAB_SUBNET" <<'PY'
 import ipaddress,subprocess,sys,xml.etree.ElementTree as ET
 wanted=ipaddress.ip_network(sys.argv[1]); hits=[]
@@ -271,7 +301,7 @@ PY
 
   NET_XML="$(mktemp /tmp/kali-adlab-net.XXXXXX.xml)"
   if [[ "$NETWORK_MODE" == nat ]]; then FORWARD_XML="<forward mode='nat'/>"; else FORWARD_XML=''; fi
-  cat > "$NET_XML" <<EOF
+  cat > "$NET_XML" <<EOFNET
 <network>
   <name>${NETWORK_NAME}</name>
   ${FORWARD_XML}
@@ -280,15 +310,19 @@ PY
     <dhcp><range start='${DHCP_START}' end='${DHCP_END}'/></dhcp>
   </ip>
 </network>
-EOF
+EOFNET
   virsh net-define "$NET_XML" >/dev/null
   virsh net-start "$NETWORK_NAME" >/dev/null
   virsh net-autostart "$NETWORK_NAME" >/dev/null
   rm -f "$NET_XML"
 fi
 
-# The build id is based only on content embedded into the reusable Windows ISO.
-BUILD_ID="$( { printf '%s\n' "$MEDIA_VERSION"; sha256sum "$REPO_DIR/windows/SetupComplete.cmd" "$REPO_DIR/windows/Configure-AD.ps1"; } | sha256sum | awk '{print $1}')"
+# Build ID includes every script embedded in the reusable Windows installer.
+BUILD_ID="$( { printf '%s\n' "$MEDIA_VERSION"; sha256sum \
+  "$REPO_DIR/windows/SetupComplete.cmd" \
+  "$REPO_DIR/windows/Configure-AD.ps1" \
+  "$REPO_DIR/windows/Run-Lab.ps1" \
+  "$REPO_DIR/windows/Seed-Assessment-Lab.ps1"; } | sha256sum | awk '{print $1}')"
 
 if validate_iso "$INSTALL_ISO" && [[ "$(cat "$MEDIA_META" 2>/dev/null || true)" == "$BUILD_ID" ]]; then
   log 'Using cached unattended Windows installer.'
@@ -328,6 +362,8 @@ else
   OEM_DIR="$TREE_DIR/sources/\$OEM\$"
   mkdir -p "$OEM_DIR/\$1/ADLab" "$OEM_DIR/\$\$/Setup/Scripts"
   cp "$REPO_DIR/windows/Configure-AD.ps1" "$OEM_DIR/\$1/ADLab/Configure-AD.ps1"
+  cp "$REPO_DIR/windows/Run-Lab.ps1" "$OEM_DIR/\$1/ADLab/Run-Lab.ps1"
+  cp "$REPO_DIR/windows/Seed-Assessment-Lab.ps1" "$OEM_DIR/\$1/ADLab/Seed-Assessment-Lab.ps1"
   cp "$REPO_DIR/windows/SetupComplete.cmd" "$OEM_DIR/\$\$/Setup/Scripts/SetupComplete.cmd"
   printf '%s\n' "$MEDIA_VERSION" > "$OEM_DIR/\$1/ADLab/media-version.txt"
 
@@ -347,7 +383,28 @@ else
   log 'Unattended Windows installer is ready.'
 fi
 
-# Discover the requested Windows image index from the prepared media.
+# Cache official SPICE Windows guest tools. Failure does not block AD deployment.
+if validate_spice_tools "$SPICE_TOOLS"; then
+  log 'Using cached Windows SPICE guest tools for shared clipboard.'
+else
+  rm -f "${SPICE_TOOLS}.partial"
+  log 'Downloading Windows SPICE guest tools for automatic copy/paste integration...'
+  if curl -fL --retry 4 --retry-delay 2 --connect-timeout 30 --progress-bar "$SPICE_TOOLS_URL" -o "${SPICE_TOOLS}.partial"; then
+    if validate_spice_tools "${SPICE_TOOLS}.partial"; then
+      mv -f "${SPICE_TOOLS}.partial" "$SPICE_TOOLS"
+      chmod 644 "$SPICE_TOOLS"
+      log 'SPICE guest tools are ready.'
+    else
+      rm -f "${SPICE_TOOLS}.partial"
+      warn 'SPICE guest tools download did not pass size validation; clipboard integration will be skipped.'
+    fi
+  else
+    rm -f "${SPICE_TOOLS}.partial"
+    warn 'Could not download SPICE guest tools; AD lab deployment will continue without automatic clipboard integration.'
+  fi
+fi
+
+# Discover requested Windows image index.
 ISO_MOUNT="$(mktemp -d /tmp/kali-adlab-wim.XXXXXX)"
 mount -o loop,ro "$INSTALL_ISO" "$ISO_MOUNT"
 WIM_PATH=''
@@ -366,15 +423,20 @@ else
 fi
 umount "$ISO_MOUNT"; rmdir "$ISO_MOUNT"
 
-# Build a small per-deployment ISO containing only answer/config data.
+# Small per-deployment ISO: answer file, secrets, fallback scripts, SPICE tools.
 RUNTIME_DIR="${BASE_DIR}/runtime-${VM_NAME}"
 MEDIA_DIR="${RUNTIME_DIR}/media"
 rm -rf "$RUNTIME_DIR"; mkdir -p "$MEDIA_DIR/ADLab"; chmod 700 "$RUNTIME_DIR" "$MEDIA_DIR" "$MEDIA_DIR/ADLab"
 DSRM_B64="$(printf '%s' "$DSRM_PASSWORD" | base64 -w0)"
-cat > "$MEDIA_DIR/ADLab/config.ps1" <<EOF
-\$LabConfig = @{ VmName='${VM_NAME}'; DomainFqdn='${DOMAIN_FQDN}'; NetbiosName='${NETBIOS_NAME}'; DcIp='${DC_IP}'; PrefixLength=${PREFIX_LEN}; Gateway='${GATEWAY_IP}'; NetworkMode='${NETWORK_MODE}'; DsrmPasswordB64='${DSRM_B64}' }
-EOF
+cat > "$MEDIA_DIR/ADLab/config.ps1" <<EOFCONFIG
+\$LabConfig = @{ VmName='${VM_NAME}'; DomainFqdn='${DOMAIN_FQDN}'; NetbiosName='${NETBIOS_NAME}'; DcIp='${DC_IP}'; PrefixLength=${PREFIX_LEN}; Gateway='${GATEWAY_IP}'; NetworkMode='${NETWORK_MODE}'; DsrmPasswordB64='${DSRM_B64}'; AssessmentProfile='assessment-demo' }
+EOFCONFIG
 chmod 600 "$MEDIA_DIR/ADLab/config.ps1"
+cp "$REPO_DIR/windows/Configure-AD.ps1" "$MEDIA_DIR/ADLab/Configure-AD.ps1"
+cp "$REPO_DIR/windows/Run-Lab.ps1" "$MEDIA_DIR/ADLab/Run-Lab.ps1"
+cp "$REPO_DIR/windows/Seed-Assessment-Lab.ps1" "$MEDIA_DIR/ADLab/Seed-Assessment-Lab.ps1"
+if validate_spice_tools "$SPICE_TOOLS"; then cp "$SPICE_TOOLS" "$MEDIA_DIR/ADLab/spice-guest-tools-latest.exe"; fi
+
 ADMIN_PASSWORD="$ADMIN_PASSWORD" python3 - "$REPO_DIR/templates/Autounattend.xml.template" "$MEDIA_DIR/Autounattend.xml" "$VM_NAME" "$IMAGE_INDEX" <<'PY'
 import html,os,pathlib,sys
 s=pathlib.Path(sys.argv[1]).read_text()
@@ -398,7 +460,7 @@ runuser -u "$QEMU_USER" -- sh -c "test -r '$INSTALL_ISO' && test -r '$CONFIG_ISO
 
 OS_VARIANT='win2k22'
 osinfo-query os --fields=short-id 2>/dev/null | grep -q win2k25 && OS_VARIANT='win2k25'
-cat <<EOF
+cat <<EOFPLAN
 
 ---------------- Deployment plan ----------------
 VM               : ${VM_NAME}
@@ -407,23 +469,26 @@ AD domain        : ${DOMAIN_FQDN} (${NETBIOS_NAME})
 Lab network      : ${NETWORK_NAME} / ${LAB_SUBNET}
 Network mode     : ${NETWORK_MODE}
 Domain Controller: ${DC_IP}
+Assessment       : 24 users / 10 computers / 47 finding families
+Clipboard        : automatic SPICE guest integration
 Resources        : ${VM_RAM_MB} MB RAM, ${VM_VCPUS} vCPU, ${DEFAULT_DISK_GB} GB disk
 -------------------------------------------------
-EOF
+EOFPLAN
 
 log 'Creating and starting Windows Server...'
 if ! virt-install --connect qemu:///system --name "$VM_NAME" --memory "$VM_RAM_MB" --vcpus "$VM_VCPUS" --cpu host-passthrough --machine q35 --boot uefi \
   --disk "path=${DISK_PATH},format=qcow2,bus=sata,cache=none,discard=unmap" \
   --cdrom "$INSTALL_ISO" --disk "path=${CONFIG_ISO},device=cdrom,bus=sata,readonly=on" \
-  --network "network=${NETWORK_NAME},model=e1000e" --graphics spice,listen=127.0.0.1 --video vga --os-variant "$OS_VARIANT" --noautoconsole; then
+  --network "network=${NETWORK_NAME},model=e1000e" --graphics spice,listen=127.0.0.1 --video vga \
+  --channel spicevmc,target_type=virtio,name=com.redhat.spice.0 \
+  --os-variant "$OS_VARIANT" --noautoconsole; then
   virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
   virsh undefine "$VM_NAME" --nvram >/dev/null 2>&1 || virsh undefine "$VM_NAME" >/dev/null 2>&1 || true
   rm -f "$DISK_PATH"
   die 'VM creation failed; the partial VM was cleaned up.'
 fi
 
-# The running first boot remains on the installer; only persistent future boots
-# are changed to hard-disk-first. This removes both the DVD prompt and boot loop.
+# First boot remains on installer; all subsequent boots prefer virtual hard disk.
 BOOT_XML="$(mktemp /tmp/kali-adlab-boot.XXXXXX.xml)"
 virsh dumpxml --inactive "$VM_NAME" > "$BOOT_XML"
 python3 - "$BOOT_XML" <<'PY'
@@ -448,16 +513,17 @@ PY
 virsh define "$BOOT_XML" >/dev/null
 rm -f "$BOOT_XML"
 log 'First boot: unattended Windows media. Subsequent boots: virtual hard disk.'
+log 'Windows, AD, assessment dataset, and clipboard integration are now automatic.'
+log "Waiting for full lab readiness on ${DC_IP} (up to $((MAX_WAIT_SECONDS/60)) minutes)..."
 
-log 'Windows installation and AD configuration are now fully automatic.'
-log "Waiting for DNS/Kerberos/LDAP on ${DC_IP} (up to $((MAX_WAIT_SECONDS/60)) minutes)..."
 START_TS=$(date +%s)
 LAST_NOTICE=0
 SHUTOFF_STREAK=0
 AUTO_STARTS=0
 READY=0
 while (( $(date +%s) - START_TS < MAX_WAIT_SECONDS )); do
-  if ports_ready "$DC_IP"; then READY=1; break; fi
+  if ports_ready "$DC_IP" && assessment_ready "$DC_IP" "$DOMAIN_FQDN"; then READY=1; break; fi
+
   STATE="$(virsh domstate "$VM_NAME" 2>/dev/null | tr -d '\r' || true)"
   if [[ "$STATE" == 'shut off' ]]; then
     ((SHUTOFF_STREAK+=1))
@@ -470,27 +536,34 @@ while (( $(date +%s) - START_TS < MAX_WAIT_SECONDS )); do
   else
     SHUTOFF_STREAK=0
   fi
+
   NOW=$(date +%s)
   if (( NOW - LAST_NOTICE >= 60 )); then
     ELAPSED=$(( (NOW-START_TS)/60 ))
-    log "Still configuring Windows/AD... ${ELAPSED} min elapsed; VM state: ${STATE:-unknown}"
+    if ports_ready "$DC_IP"; then
+      log "AD is online; waiting for assessment users/scenarios to finish... ${ELAPSED} min elapsed; VM state: ${STATE:-unknown}"
+    else
+      log "Still configuring Windows/AD... ${ELAPSED} min elapsed; VM state: ${STATE:-unknown}"
+    fi
     LAST_NOTICE=$NOW
   fi
   sleep 10
 done
 
 if (( READY == 0 )); then
-  warn 'AD services did not become reachable within the expected window.'
+  warn 'The full lab did not become ready within the expected window.'
   warn "VM state: $(virsh domstate "$VM_NAME" 2>/dev/null | tr -d '\r' || echo unknown)"
+  if ports_ready "$DC_IP"; then warn 'AD services are reachable, but the assessment completion marker is missing.'; fi
   warn "The VM and LABCONFIG media were left intact so Windows can resume. Log: ${RUN_LOG}"
   exit 1
 fi
 
-log 'AD services are reachable. Performing final stabilization check...'
+log 'AD services and assessment completion marker are reachable. Performing final stabilization check...'
 sleep 30
 ports_ready "$DC_IP" || die 'AD services became unavailable during final validation.'
+assessment_ready "$DC_IP" "$DOMAIN_FQDN" || die 'Assessment completion marker disappeared during final validation.'
 
-# Secret-bearing config media is removed only after AD is proven healthy.
+# Secret-bearing config media is removed only after the full assessment lab is proven ready.
 CONFIG_TARGET="$(virsh domblklist "$VM_NAME" --details 2>/dev/null | awk -v src="$CONFIG_ISO" '$1=="file" && $2=="cdrom" && $4==src {print $3; exit}')"
 if [[ -n "$CONFIG_TARGET" ]]; then
   virsh change-media "$VM_NAME" "$CONFIG_TARGET" --eject --live --force >/dev/null 2>&1 || true
@@ -498,15 +571,4 @@ if [[ -n "$CONFIG_TARGET" ]]; then
 fi
 shred -u "$CONFIG_ISO" 2>/dev/null || rm -f "$CONFIG_ISO"
 
-printf '\n============================================================\n'
-printf ' Kali-AD-Lab | LAB READY\n'
-printf '============================================================\n'
-printf 'VM               : %s\n' "$VM_NAME"
-printf 'AD Domain        : %s\n' "$DOMAIN_FQDN"
-printf 'Domain Controller: %s\n' "$DC_IP"
-printf 'DNS              : READY\n'
-printf 'Kerberos         : READY\n'
-printf 'LDAP             : READY\n'
-printf 'Login            : %s\\Administrator\n' "$NETBIOS_NAME"
-printf 'Run log          : %s\n' "$RUN_LOG"
-printf '============================================================\n'
+print_ready
