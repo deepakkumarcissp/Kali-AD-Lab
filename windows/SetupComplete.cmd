@@ -6,13 +6,7 @@ if not exist C:\ADLab\Logs mkdir C:\ADLab\Logs
 set LOG=C:\ADLab\Logs\Bootstrap.log
 set TASK=Kali-AD-Lab-ConfigureAD
 
-echo [%date% %time%] Kali-AD-Lab bootstrap invoked.>>"%LOG%"
-
-if exist C:\ADLab\BOOTSTRAP-READY.txt (
-  echo [%date% %time%] Bootstrap already completed; starting/resuming task.>>"%LOG%"
-  schtasks /Run /TN "%TASK%" >>"%LOG%" 2>&1
-  exit /b 0
-)
+echo [%date% %time%] Kali-AD-Lab post-setup bootstrap invoked.>>"%LOG%"
 
 set CFG=
 set ENGINE=
@@ -46,29 +40,19 @@ if errorlevel 1 goto :copyfail
 if not exist C:\ADLab\config.ps1 goto :copyfail
 if not exist C:\ADLab\Configure-AD.ps1 goto :copyfail
 
-schtasks /Delete /TN "%TASK%" /F >>"%LOG%" 2>&1
-schtasks /Create /TN "%TASK%" /SC ONSTART /RU SYSTEM /RL HIGHEST /TR "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File C:\ADLab\Configure-AD.ps1" /F >>"%LOG%" 2>&1
+rem Register one task with two safe triggers:
+rem   1) one-time delayed launch after SetupComplete has returned;
+rem   2) delayed startup trigger so required AD reboots resume automatically.
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $a=New-ScheduledTaskAction -Execute 'PowerShell.exe' -Argument '-NoLogo -NoProfile -ExecutionPolicy Bypass -File C:\ADLab\Configure-AD.ps1'; $once=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(3); $boot=New-ScheduledTaskTrigger -AtStartup; $boot.Delay='PT2M'; $p=New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest; Unregister-ScheduledTask -TaskName '%TASK%' -Confirm:$false -ErrorAction SilentlyContinue; Register-ScheduledTask -TaskName '%TASK%' -Action $a -Trigger @($once,$boot) -Principal $p -Force | Out-Null" >>"%LOG%" 2>&1
 if errorlevel 1 (
-  echo [%date% %time%] ERROR: Failed to register Configure-AD startup task.>>"%LOG%"
-  echo Failed to register Configure-AD scheduled task.>C:\ADLab\FAILED-Bootstrap.txt
+  echo [%date% %time%] ERROR: Failed to register delayed Configure-AD task.>>"%LOG%"
+  echo Failed to register delayed Configure-AD scheduled task.>C:\ADLab\FAILED-Bootstrap.txt
   exit /b 0
 )
 
-rem Disable the one-time Administrator auto-logon before AD promotion.
-reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v AutoAdminLogon /t REG_SZ /d 0 /f >>"%LOG%" 2>&1
-reg delete "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v DefaultPassword /f >>"%LOG%" 2>&1
-
-echo Bootstrap completed successfully.>C:\ADLab\BOOTSTRAP-READY.txt
+echo Bootstrap staged successfully. AD configuration is intentionally deferred until Windows Setup has fully exited.>C:\ADLab\BOOTSTRAP-READY.txt
 del /Q C:\ADLab\FAILED-Bootstrap.txt >nul 2>&1
-
-echo [%date% %time%] Starting Configure-AD task.>>"%LOG%"
-schtasks /Run /TN "%TASK%" >>"%LOG%" 2>&1
-if errorlevel 1 (
-  echo [%date% %time%] Immediate task start failed; startup trigger remains registered.>>"%LOG%"
-  shutdown.exe /r /t 10 /f
-) else (
-  echo [%date% %time%] Configure-AD task launched successfully.>>"%LOG%"
-)
+echo [%date% %time%] Configure-AD scheduled for delayed post-setup execution.>>"%LOG%"
 exit /b 0
 
 :copyfail
