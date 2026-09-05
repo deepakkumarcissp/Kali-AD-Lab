@@ -30,24 +30,30 @@ try {
     }
 
     Write-Host '[Stage1] Installing Active Directory Domain Services and management tools...'
-    Install-WindowsFeature AD-Domain-Services -IncludeManagementTools | Out-Null
+    $featureResult = Install-WindowsFeature AD-Domain-Services -IncludeManagementTools
 
     # AD DNS will listen on the DC address after promotion.
     Set-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -ServerAddresses @($LabConfig.DcIp)
 
-    Write-Host '[Stage1] Registering domain-promotion stage...'
-    $action = New-ScheduledTaskAction -Execute 'PowerShell.exe' -Argument '-NoLogo -NoProfile -ExecutionPolicy Bypass -File C:\ADLab\Stage2.ps1'
-    $trigger = New-ScheduledTaskTrigger -AtStartup
-    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-    Register-ScheduledTask -TaskName 'Kali-AD-Lab-Stage2' -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+    if ($featureResult.RestartNeeded -eq 'Yes') {
+        Write-Host '[Stage1] Windows requires a reboot before promotion. Registering Stage2 for next startup...'
+        $action = New-ScheduledTaskAction -Execute 'PowerShell.exe' -Argument '-NoLogo -NoProfile -ExecutionPolicy Bypass -File C:\ADLab\Stage2.ps1'
+        $trigger = New-ScheduledTaskTrigger -AtStartup
+        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        Register-ScheduledTask -TaskName 'Kali-AD-Lab-Stage2' -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+        Stop-Transcript
+        Restart-Computer -Force
+        exit 0
+    }
 
-    Write-Host '[Stage1] Restarting Windows to continue AD configuration...'
+    Write-Host '[Stage1] AD DS role is ready. Continuing directly to domain promotion...'
     Stop-Transcript
-    Restart-Computer -Force
+    & PowerShell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File 'C:\ADLab\Stage2.ps1'
+    exit $LASTEXITCODE
 }
 catch {
     Write-Error $_
     $_ | Out-File 'C:\ADLab\FAILED-Stage1.txt' -Append
-    Stop-Transcript
+    try { Stop-Transcript } catch {}
     exit 1
 }
