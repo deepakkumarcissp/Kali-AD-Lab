@@ -127,6 +127,20 @@ function Complete-Lab {
         }
     }
 
+    $profile = 'clean'
+    if ($Config.ContainsKey('AssessmentProfile') -and $Config.AssessmentProfile) {
+        $profile = [string]$Config.AssessmentProfile
+    }
+    if ($profile -eq 'assessment-demo') {
+        $seed = Join-Path $Root 'Seed-Assessment-Lab.ps1'
+        if (-not (Test-Path $seed)) { throw 'Assessment-demo profile selected but C:\ADLab\Seed-Assessment-Lab.ps1 is missing.' }
+        Write-Host '[Configure-AD] Seeding comprehensive security-assessment demo scenarios...'
+        $args = @('-NoLogo','-NoProfile','-ExecutionPolicy','Bypass','-File',$seed,'-ExpectedDomain',$Config.DomainFqdn)
+        $proc = Start-Process -FilePath 'PowerShell.exe' -ArgumentList $args -Wait -PassThru
+        if ($proc.ExitCode -ne 0) { throw "Assessment-demo seeding failed with exit code $($proc.ExitCode)." }
+        if (-not (Test-Path (Join-Path $Root 'ASSESSMENT-DEMO-READY.txt'))) { throw 'Assessment-demo seeding did not create its ready marker.' }
+    }
+
     @"
 Kali-AD-Lab deployment completed successfully.
 Computer: $env:COMPUTERNAME
@@ -134,6 +148,7 @@ Domain: $($domain.DNSRoot)
 NetBIOS: $($domain.NetBIOSName)
 Forest: $($forest.Name)
 DC IP: $($Config.DcIp)
+Profile: $profile
 Completed: $(Get-Date -Format o)
 "@ | Out-File $SuccessFile -Encoding utf8
 
@@ -141,7 +156,7 @@ Completed: $(Get-Date -Format o)
     Remove-Item (Join-Path $Root 'config.ps1') -Force -ErrorAction SilentlyContinue
     Remove-Item $AttemptFile -Force -ErrorAction SilentlyContinue
     Remove-Item $FailureFile -Force -ErrorAction SilentlyContinue
-    Write-Host '[Configure-AD] Active Directory lab is ready.'
+    Write-Host "[Configure-AD] Active Directory lab is ready. Profile: $profile"
 }
 
 try {
