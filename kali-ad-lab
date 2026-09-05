@@ -2,9 +2,11 @@
 set -Eeuo pipefail
 
 REPO_URL="https://github.com/deepakkumarcissp/Kali-AD-Lab.git"
-INSTALL_DIR="${KALI_AD_LAB_HOME:-/opt/Kali-AD-Lab}"
+DEFAULT_INSTALL_DIR="/opt/Kali-AD-Lab"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 log(){ printf '[Kali-AD-Lab] %s\n' "$*"; }
+warn(){ printf '[Kali-AD-Lab] WARNING: %s\n' "$*" >&2; }
 die(){ printf '[Kali-AD-Lab] ERROR: %s\n' "$*" >&2; exit 1; }
 
 if [[ ${EUID} -ne 0 ]]; then
@@ -17,22 +19,107 @@ command -v git >/dev/null 2>&1 || {
   apt-get install -y git
 }
 
-if [[ -d "${INSTALL_DIR}/.git" ]]; then
-  log 'Updating Kali-AD-Lab...'
-  git -C "$INSTALL_DIR" fetch origin main
-  git -C "$INSTALL_DIR" reset --hard origin/main
-else
-  if [[ -e "$INSTALL_DIR" ]]; then
-    die "${INSTALL_DIR} already exists but is not a Kali-AD-Lab Git checkout. Move/remove it or set KALI_AD_LAB_HOME to another path."
+# When launched from an existing checkout (ideal for private-repo testing),
+# use that checkout directly. Public/bootstrap installs use /opt/Kali-AD-Lab.
+if [[ -d "${SCRIPT_DIR}/.git" ]]; then
+  INSTALL_DIR="$SCRIPT_DIR"
+  log "Using current repository checkout: ${INSTALL_DIR}"
+
+  # Best-effort update. A private repo may require user-specific credentials
+  # that are not available to root, so failure here must not block the lab.
+  if git -C "$INSTALL_DIR" fetch origin main >/dev/null 2>&1; then
+    git -C "$INSTALL_DIR" reset --hard origin/main >/dev/null
+    log 'Repository updated to origin/main.'
+  else
+    warn 'Could not refresh the private repository as root; continuing with the current checked-out version.'
   fi
-  log "Installing Kali-AD-Lab into ${INSTALL_DIR}..."
-  mkdir -p "$(dirname "$INSTALL_DIR")"
-  git clone "$REPO_URL" "$INSTALL_DIR"
+else
+  INSTALL_DIR="${KALI_AD_LAB_HOME:-$DEFAULT_INSTALL_DIR}"
+
+  if [[ -d "${INSTALL_DIR}/.git" ]]; then
+    log 'Updating Kali-AD-Lab...'
+    git -C "$INSTALL_DIR" fetch origin main
+    git -C "$INSTALL_DIR" reset --hard origin/main
+  else
+    if [[ -e "$INSTALL_DIR" ]]; then
+      die "${INSTALL_DIR} already exists but is not a Kali-AD-Lab Git checkout."
+    fi
+    log "Installing Kali-AD-Lab into ${INSTALL_DIR}..."
+    mkdir -p "$(dirname "$INSTALL_DIR")"
+    git clone "$REPO_URL" "$INSTALL_DIR"
+  fi
 fi
 
-chmod +x "$INSTALL_DIR/setup.sh"
-
-# Make future launches even simpler after the first successful invocation.
+chmod +x "$INSTALL_DIR/setup.sh" "$INSTALL_DIR/kali-ad-lab"
 ln -sf "$INSTALL_DIR/kali-ad-lab" /usr/local/bin/kali-ad-lab 2>/dev/null || true
 
-exec bash "$INSTALL_DIR/setup.sh" "$@"
+RUN_LOG="$(mktemp /tmp/kali-ad-lab-run.XXXXXX.log)"
+cleanup(){ rm -f "$RUN_LOG"; }
+trap cleanup EXIT
+
+log 'Starting automated Active Directory lab deployment...'
+set +e
+bash "$INSTALL_DIR/setup.sh" "$@" 2>&1 | tee "$RUN_LOG"
+SETUP_RC=${PIPESTATUS[0]}
+set -e
+
+(( SETUP_RC == 0 )) || die "Setup exited with code ${SETUP_RC}. Review the error shown above."
+
+VM_NAME="$(awk -F': ' '/^VM: /{v=$2} END{print v}' "$RUN_LOG")"
+DOMAIN_FQDN="$(awk -F': ' '/^Domain: /{v=$2} END{print v}' "$RUN_LOG")"
+DC_IP="$(awk -F': ' '/^DC IP: /{v=$2} END{print v}' "$RUN_LOG")"
+
+[[ -n "$VM_NAME" && -n "$DOMAIN_FQDN" && -n "$DC_IP" ]] || {
+  warn 'VM creation finished, but readiness details could not be parsed. The deployment output above contains the generated values.'
+  exit 0
+}
+
+log "Windows installation is running inside ${VM_NAME}."
+log "Automatic AD readiness check started for ${DC_IP}."
+
+READY=0
+LAST_NOTICE=0
+for ATTEMPT in $(seq 1 360); do
+  if nc -z -w 2 "$DC_IP" 389 >/dev/null 2>&1 \
+     && nc -z -w 2 "$DC_IP" 88 >/dev/null 2>&1 \
+     && nc -z -w 2 "$DC_IP" 53 >/dev/null 2>&1; then
+    READY=1
+    break
+  fi
+
+  # Show a small heartbeat roughly once per minute without flooding output.
+  if (( ATTEMPT - LAST_NOTICE >= 6 )); then
+    STATE="$(virsh domstate "$VM_NAME" 2>/dev/null | tr -d '\r' || true)"
+    log "Still configuring Windows/AD... VM state: ${STATE:-unknown}"
+    LAST_NOTICE=$ATTEMPT
+  fi
+  sleep 10
+done
+
+if (( READY == 0 )); then
+  printf '\n============================================================\n'
+  printf ' Kali-AD-Lab | AUTOMATION NEEDS ATTENTION\n'
+  printf '============================================================\n'
+  printf 'VM     : %s\n' "$VM_NAME"
+  printf 'Domain : %s\n' "$DOMAIN_FQDN"
+  printf 'DC IP  : %s\n' "$DC_IP"
+  printf '\nThe VM was created, but AD services did not become reachable.\n'
+  printf 'Open Virtual Machine Manager and inspect %s.\n' "$VM_NAME"
+  printf '============================================================\n'
+  exit 1
+fi
+
+# Allow the post-promotion validation/cleanup stage to settle, then verify again.
+sleep 30
+
+NETBIOS="$(printf '%s' "${DOMAIN_FQDN%%.*}" | tr '[:lower:]' '[:upper:]' | cut -c1-15)"
+
+printf '\n============================================================\n'
+printf ' Kali-AD-Lab | LAB READY\n'
+printf '============================================================\n'
+printf 'VM              : %s\n' "$VM_NAME"
+printf 'AD Domain       : %s\n' "$DOMAIN_FQDN"
+printf 'Domain Controller: %s\n' "$DC_IP"
+printf 'Login           : %s\\Administrator\n' "$NETBIOS"
+printf '\nOpen Virtual Machine Manager and open %s to use Windows.\n' "$VM_NAME"
+printf '============================================================\n'
