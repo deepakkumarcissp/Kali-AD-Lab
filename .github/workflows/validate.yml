@@ -1,0 +1,38 @@
+name: Validate Kali-AD-Lab
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Bash syntax
+        run: |
+          bash -n kali-ad-lab
+          bash -n bootstrap.sh
+          bash -n scripts/destroy-lab.sh
+
+      - name: Validate unattended XML template
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          ET.parse('templates/Autounattend.xml.template')
+          print('Autounattend XML is well formed')
+          PY
+
+      - name: Validate consolidated architecture
+        run: |
+          test -f windows/Configure-AD.ps1
+          test -f windows/SetupComplete.cmd
+          grep -q 'Install-ADDSForest' windows/Configure-AD.ps1
+          grep -q 'Kali-AD-Lab-ConfigureAD' windows/SetupComplete.cmd
+          ! test -e setup.sh
+          ! test -e windows/Stage1.ps1
+          ! test -e windows/Stage2.ps1
+          ! test -e windows/Stage3.ps1
+          ! grep -R 'LABTOOLS' -n kali-ad-lab windows templates || false
