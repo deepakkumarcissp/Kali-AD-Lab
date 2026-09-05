@@ -2,15 +2,15 @@
 
 The `assessment-demo` profile turns the otherwise clean Windows Server 2025 domain into an intentionally insecure, assessment-ready Active Directory training environment.
 
-> **Safety:** this profile is for isolated training only. The seed script refuses to run unless the domain ends in `.test`, `.lab`, `.example`, or `.invalid`, and it must run on a Domain Controller. Never use it against a production or business domain.
+> **Safety:** this profile is for isolated training only. The AD engine refuses to seed the assessment profile unless the domain ends in `.test`, `.lab`, `.example`, or `.invalid`, and it runs only after the server is already a Domain Controller. Never use this profile against a production or business domain.
 
 ## Purpose
 
-The profile is designed to support defensive Active Directory security assessments, control validation, scanner demonstrations, remediation exercises, and before/after reporting. It creates synthetic users, groups, computer objects, OUs, GPOs, delegation relationships, ACL weaknesses, protocol-hardening gaps, and DNS weaknesses so an assessment has meaningful findings instead of scanning a pristine domain.
+The profile supports defensive Active Directory security assessments, control validation, scanner demonstrations, remediation exercises, and before/after reporting. It creates synthetic users, groups, computer objects, OUs, GPOs, delegation relationships, ACL weaknesses, Kerberos conditions, protocol-hardening gaps, and DNS weaknesses so an assessment has meaningful findings instead of scanning a pristine domain.
 
 ## Synthetic organization
 
-The profile creates a realistic Tier 0 / Tier 1 / Tier 2 structure with approximately 24 users and 10 computer objects:
+The profile creates a realistic Tier 0 / Tier 1 / Tier 2 structure with 24 synthetic users and 10 computer objects:
 
 ```text
 adlab.test
@@ -31,25 +31,25 @@ adlab.test
 
 ## Expected assessment coverage
 
-The seed currently targets 46 controlled findings across these families:
+The core single-DC profile currently targets **47 controlled findings** across these families:
 
 | ID range | Assessment family | Examples |
 |---|---|---|
 | ADL-001–009 | Privileged access / tiering | nested Tier-1 admins in Domain Admins, direct legacy Domain Admin, Enterprise/Schema Admin overuse, Backup Operators, Account Operators, DNSAdmins, missing Protected Users coverage, delegatable privileged users |
 | ADL-010–022 | Identity / Kerberos / account hygiene | password-never-expires service accounts, SPNs, RC4-only service identity, constrained delegation, AS-REP roastable account, DES-only account, reversible encryption, password-not-required, expired-but-enabled account, adminCount anomaly, retained privileged account |
 | ADL-023–028 | Password / workstation hygiene | weak domain password policy, no lockout, excessive MachineAccountQuota, weak fine-grained service-account policy, unconstrained delegation, synthetic workstation password/LAPS gaps |
-| ADL-029–032 | ACL / shadow-admin paths | Helpdesk GenericAll on service-account OU, application admins with domain-root WriteDACL, control of AdminSDHolder, Helpdesk GenericWrite on Tier0 OU |
-| ADL-033–037 | Group Policy | Helpdesk can modify linked GPO, LLMNR enabled, NTLMv1 compatibility, SMB signing not required, orphaned GPO |
-| ADL-038–044 | DC protocol hardening | LDAP signing disabled, LDAP channel binding disabled, NTLMv1 compatibility, weak anonymous restrictions, LM-hash protection disabled, SMB signing not required, Print Spooler enabled on DC |
-| ADL-045–046 | DNS | nonsecure dynamic updates, unrestricted zone transfer |
+| ADL-029–033 | ACL / shadow-admin / replication paths | Helpdesk GenericAll on service-account OU, domain-root WriteDACL, AdminSDHolder control, Tier0 OU write access, delegated replication/DCSync-equivalent rights |
+| ADL-034–038 | Group Policy | Helpdesk can modify linked GPO, LLMNR enabled, NTLMv1 compatibility, SMB signing not required, orphaned GPO |
+| ADL-039–045 | DC protocol hardening | LDAP signing disabled, LDAP channel binding disabled, NTLMv1 compatibility, weak anonymous restrictions, LM-hash protection disabled, SMB signing not required, Print Spooler enabled on DC |
+| ADL-046–047 | DNS | nonsecure dynamic updates, unrestricted zone transfer |
 
-Windows also writes the expected-finding list to:
+Windows writes the complete expected-finding list to:
 
 ```text
 C:\ADLab\EXPECTED-FINDINGS.txt
 ```
 
-and a profile marker to:
+and writes the profile completion marker to:
 
 ```text
 C:\ADLab\ASSESSMENT-DEMO-READY.txt
@@ -61,6 +61,8 @@ Use the profile for a complete defensive lifecycle:
 
 ```text
 Build lab
+   ↓
+Seed known assessment conditions
    ↓
 Run AD security assessment
    ↓
@@ -77,17 +79,46 @@ Demonstrate measurable risk reduction
 
 The expected-finding list is intentionally tool-neutral. It can be used with commercial or open-source AD assessment products without endorsing a specific vendor.
 
+## Coverage areas represented in the core profile
+
+The single-DC profile includes practical assessment material for:
+
+- Tier 0 / Tier 1 / Tier 2 separation
+- privileged-group membership and nested privileges
+- Protected Users coverage
+- service-account governance
+- password policy and fine-grained password policy
+- stale, expired, retained, and anomalous accounts
+- Kerberos pre-authentication and encryption settings
+- SPNs and delegated authentication
+- unconstrained and constrained delegation
+- machine-account quota
+- workstation/computer-account hygiene
+- LDAP signing and channel binding
+- NTLM/LM compatibility
+- anonymous enumeration restrictions
+- SMB signing
+- Print Spooler on a Domain Controller
+- DNS dynamic updates and zone transfers
+- OU ACLs and shadow-admin paths
+- AdminSDHolder permissions
+- domain-root WriteDACL
+- delegated directory replication / DCSync-equivalent rights
+- GPO permissions and weak legacy security policy
+- orphaned/unlinked GPO detection
+
 ## Advanced profiles that need additional infrastructure
 
-Some important AD security-assessment categories cannot be represented honestly on a single-DC lab and are intentionally not faked in the core profile. These should become separate advanced modules:
+Some major AD assessment categories cannot be represented honestly on one Domain Controller. These should remain separate advanced modules rather than fake findings:
 
-- **AD CS / PKI:** certificate-template and enrollment-control weaknesses, including ESC-class findings, require an Enterprise CA and certificate templates.
-- **Trust security:** SID filtering, selective authentication, transitive trust, cross-domain privilege paths, and forest trust cases require at least a second domain/forest.
-- **Replication / DC resilience:** lingering objects, replication topology, DC isolation, and multi-DC configuration drift require another Domain Controller.
-- **RODC:** password replication policy, cached privileged credentials, and RODC delegation require an RODC.
-- **Hybrid identity:** Entra Connect / cloud sync / hybrid privilege paths require a separate hybrid identity module and cloud tenant.
+- **AD CS / PKI:** Enterprise CA, certificate templates, enrollment rights, web enrollment, and ESC-class assessment cases.
+- **Trust security:** child domain, second forest, SID filtering, selective authentication, transitive trust, and cross-domain privilege paths.
+- **Multi-DC / replication:** second Domain Controller, replication topology, site/subnet design, stale replication, and configuration drift.
+- **RODC:** password replication policy, cached privileged credentials, delegated RODC administration, and branch-office security.
+- **Hybrid identity:** Entra Connect / cloud sync, synchronization account privilege, hybrid admin separation, and cloud-to-AD identity paths.
+- **Enterprise endpoint tiering:** real member servers and workstations are required to assess local administrators, interactive logon exposure, LAPS deployment, PAW controls, and cross-tier credential paths realistically.
 
-These are intentionally separated so the base assessment profile remains reproducible and does not pretend to test controls that are not actually present.
+These modules can be added later as optional profiles so the base assessment lab stays reproducible and lightweight.
 
 ## Isolation warning
 
