@@ -5,7 +5,8 @@ SOURCE_ISO="${1:?source Windows ISO required}"
 OUTPUT_ISO="${2:?output ISO required}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-MEDIA_LABEL='WS25_ADLAB_V2'
+MEDIA_VERSION='WS25_ADLAB_V2'
+VERSION_FILE="${OUTPUT_ISO}.version"
 
 log(){ printf '[Kali-AD-Lab] %s\n' "$*"; }
 die(){ printf '[Kali-AD-Lab] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -52,15 +53,14 @@ mount -o loop,ro "$SOURCE_ISO" "$MOUNT_DIR"
 cp -a "$MOUNT_DIR/." "$TREE_DIR/"
 umount "$MOUNT_DIR"
 
-# Use the supported Windows $OEM$ mechanism for static bootstrap files. This
-# avoids executing fragile media-discovery logic during the specialize pass.
+# Embed static bootstrap files using Windows' supported $OEM$ mechanism.
 OEM_DIR="$TREE_DIR/sources/\$OEM\$"
 mkdir -p "$OEM_DIR/\$1/ADLab" "$OEM_DIR/\$\$/Setup/Scripts"
 cp "$REPO_DIR/windows/Stage1.ps1" "$OEM_DIR/\$1/ADLab/Stage1.ps1"
 cp "$REPO_DIR/windows/Stage2.ps1" "$OEM_DIR/\$1/ADLab/Stage2.ps1"
 cp "$REPO_DIR/windows/Stage3.ps1" "$OEM_DIR/\$1/ADLab/Stage3.ps1"
 cp "$REPO_DIR/windows/SetupComplete.cmd" "$OEM_DIR/\$\$/Setup/Scripts/SetupComplete.cmd"
-printf '%s\n' "$MEDIA_LABEL" > "$OEM_DIR/\$1/ADLab/media-version.txt"
+printf '%s\n' "$MEDIA_VERSION" > "$OEM_DIR/\$1/ADLab/media-version.txt"
 
 mkdir -p "$(dirname "$OUTPUT_ISO")"
 rm -f "$TMP_ISO"
@@ -68,7 +68,7 @@ rm -f "$TMP_ISO"
 xorriso -as mkisofs \
   -iso-level 3 \
   -J -joliet-long -R \
-  -V "$MEDIA_LABEL" \
+  -V "$MEDIA_VERSION" \
   -b boot/etfsboot.com \
   -no-emul-boot -boot-load-size 8 -boot-info-table \
   -eltorito-alt-boot \
@@ -80,4 +80,6 @@ xorriso -as mkisofs \
 validate_iso "$TMP_ISO" || die 'Generated unattended Windows ISO failed validation.'
 mv -f "$TMP_ISO" "$OUTPUT_ISO"
 chmod 644 "$OUTPUT_ISO"
+printf '%s\n' "$MEDIA_VERSION" > "$VERSION_FILE"
+chmod 644 "$VERSION_FILE"
 log "Unattended Windows ISO ready: ${OUTPUT_ISO}"
