@@ -1,22 +1,46 @@
 # Kali-AD-Lab
 
-Build a complete Windows Server Active Directory lab on Kali Linux with one command.
+Build a complete Windows Server Active Directory lab on Kali Linux with a simple guided installer.
 
 The project installs and configures KVM/QEMU + libvirt, downloads the official Microsoft Windows Server 2025 Evaluation ISO, creates a safe virtual network, performs an unattended Windows installation, configures a static IP, installs AD DS/DNS, creates a new forest, validates the Domain Controller, and removes temporary unattended secrets.
 
 > Designed for cybersecurity learning, administration practice, defensive testing, and authorized lab research.
 
-## One-command deployment
+## Quick Start
+
+### After Kali-AD-Lab is installed
+
+Run just:
 
 ```bash
-git clone https://github.com/deepakkumarcissp/Kali-AD-Lab.git
-cd Kali-AD-Lab
-sudo bash setup.sh
+sudo kali-ad-lab
 ```
 
-If the repository is still private, clone it using your authenticated GitHub method. After the repository becomes public, the HTTPS command above will work directly for everyone.
+The launcher updates Kali-AD-Lab automatically and starts the guided setup.
 
-## What the script asks
+### First-time install after this repository is public
+
+Users will be able to copy and paste one command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/deepakkumarcissp/Kali-AD-Lab/main/bootstrap.sh | sudo bash
+```
+
+That command installs Kali-AD-Lab and immediately starts the setup wizard. After that, future runs only require:
+
+```bash
+sudo kali-ad-lab
+```
+
+### Testing while this repository is private
+
+GitHub authentication is required to obtain a private repository. From an already authenticated clone, run:
+
+```bash
+sudo ./kali-ad-lab
+```
+
+## What the installer asks
 
 The installer uses sensible defaults and only asks for settings that are environment-specific or security-sensitive:
 
@@ -31,7 +55,7 @@ The installer uses sensible defaults and only asks for settings that are environ
 | Administrator password | Prompted securely |
 | DSRM password | Prompted securely |
 
-You can simply press **Enter** to accept a default.
+Press **Enter** to accept any recommended default.
 
 ### Why `adlab.test` instead of `adlab.local`?
 
@@ -39,33 +63,26 @@ You can simply press **Enter** to accept a default.
 
 ## What is fully automated
 
-After the prompts, the script automatically:
+After the prompts, the project automatically:
 
 1. Checks Intel VT-x / AMD-V support.
-2. Detects potentially conflicting VirtualBox/VMware host modules.
-3. Installs KVM/QEMU, libvirt, virt-manager, OVMF and supporting tools.
-4. Checks available host RAM, CPU and disk space.
-5. Detects an existing VM with the same name and refuses to overwrite it silently.
-6. Checks the requested lab subnet against:
-   - Kali host routes
-   - Docker/container routes visible to the host
-   - active libvirt networks
-   - inactive libvirt network definitions
-7. Suggests another private subnet if the requested range overlaps.
-8. Creates a libvirt NAT or fully isolated network.
-9. Downloads the Windows Server 2025 Evaluation ISO from Microsoft's official download redirect.
-10. Validates that the download is a usable ISO and inspects its Windows image metadata.
-11. Creates temporary unattended installation media.
-12. Creates the Windows Server VM.
-13. Performs the Windows installation without Windows Setup clicks.
-14. Configures the Domain Controller's static IP.
-15. Installs Active Directory Domain Services and DNS.
-16. Creates the AD forest.
-17. Reboots automatically as required.
-18. Validates that AD services are running.
-19. Configures the libvirt DNS forwarder when NAT mode is used.
-20. Removes the copied secret configuration inside Windows.
-21. Ejects and securely removes the temporary host-side unattended ISO after LDAP becomes available.
+2. Installs KVM/QEMU, libvirt, virt-manager, OVMF and supporting tools.
+3. Checks available host RAM, CPU and disk space.
+4. Detects an existing VM with the same name and refuses to overwrite it silently.
+5. Checks the requested lab subnet against host and libvirt networks.
+6. Suggests another private subnet if the requested range overlaps.
+7. Creates a libvirt NAT or fully isolated network.
+8. Downloads the Windows Server 2025 Evaluation ISO from Microsoft's official download redirect.
+9. Validates the downloaded ISO and identifies the required Windows image.
+10. Creates temporary unattended installation media.
+11. Creates and starts the Windows Server VM.
+12. Performs Windows installation without Windows Setup clicks.
+13. Configures the Domain Controller static IP.
+14. Installs Active Directory Domain Services and DNS.
+15. Creates the AD forest.
+16. Reboots automatically as required.
+17. Validates AD services.
+18. Removes temporary unattended secrets and setup media after successful promotion.
 
 ## Default architecture
 
@@ -108,89 +125,31 @@ No Internet forwarding is configured for the lab network. Use this when you want
 | Network adapter | Emulated Intel adapter for Windows compatibility |
 | Display | SPICE/VGA |
 
-On a lower-memory Kali host, the installer can automatically reduce the VM to 4 GB after warning you.
-
 ## Windows Server evaluation media
 
-The project uses **Windows Server 2025 Evaluation**, downloaded directly from Microsoft.
-
-Official Microsoft Evaluation Center:
-
-https://www.microsoft.com/en-us/evalcenter/download-windows-server-2025
-
-Microsoft states that the evaluation is valid for 180 days and requires online activation during the initial evaluation period.
-
-The Microsoft ISO is never stored in this GitHub repository.
+The project uses **Windows Server 2025 Evaluation**, downloaded directly from Microsoft. The Microsoft ISO is never stored in this GitHub repository.
 
 ## Password handling
 
-Administrator and Directory Services Restore Mode passwords are entered with hidden terminal prompts.
+Administrator and Directory Services Restore Mode passwords are entered with hidden terminal prompts and are never committed to Git.
 
-The project intentionally does **not** place credentials in Git.
-
-During unattended Windows installation, credentials must temporarily exist in locally generated answer media. Kali-AD-Lab therefore:
-
-- stores generated files under a root-only libvirt directory;
-- gives them restrictive filesystem permissions;
-- copies only what Windows requires;
-- removes the Windows-side configuration after AD promotion;
-- watches for LDAP availability from Kali;
-- ejects the temporary `LABTOOLS` ISO;
-- securely removes generated unattended files from the Kali host.
+During unattended Windows installation, credentials temporarily exist only in locally generated setup media. Kali-AD-Lab removes the generated secret configuration and temporary LABTOOLS ISO after successful AD promotion.
 
 Do not use production or corporate passwords in a lab.
 
 ## Collision and safety behavior
 
-Kali-AD-Lab is deliberately conservative.
+Kali-AD-Lab is deliberately conservative:
 
-### Existing VM
+- Existing VM names are never silently overwritten.
+- Existing network ranges are checked before creation.
+- Compatible existing lab networks can be reused.
+- The Domain Controller is not bridged directly to the physical LAN.
+- Temporary setup secrets are cleaned up automatically after successful promotion.
 
-If `DC01` already exists, the script stops and requires the user to explicitly type `REBUILD` before any existing VM/storage is removed.
+## Using the lab
 
-### Existing network range
-
-If `192.168.77.0/24` is already in use, the script detects the overlap and proposes another private `/24` network. The user can accept the suggestion or type another subnet.
-
-### Existing libvirt network name
-
-If `ad-lab` already exists with matching settings, it is safely reused. If its subnet/mode is different, the installer asks for another network name rather than changing an unrelated network.
-
-### Other hypervisors
-
-If VirtualBox or VMware host modules are detected, the installer warns before continuing because another running hypervisor may already be using hardware virtualization.
-
-### Production isolation
-
-The installer does not configure a bridged NIC for the Domain Controller. This helps prevent accidental placement of the lab DC directly onto a corporate/home LAN.
-
-## Watch deployment
-
-The deployment itself is unattended, but you can view the console at any time:
-
-```bash
-virt-manager
-```
-
-Check VM status:
-
-```bash
-sudo virsh list --all
-```
-
-Check the lab network:
-
-```bash
-sudo virsh net-info ad-lab
-```
-
-After successful AD promotion, Windows writes:
-
-```text
-C:\ADLab\SUCCESS.txt
-```
-
-The default login becomes:
+After successful AD promotion, sign in to the Windows Server VM as:
 
 ```text
 ADLAB\Administrator
@@ -198,32 +157,22 @@ ADLAB\Administrator
 
 Use the Administrator password you entered during setup.
 
-## Teardown
-
-To remove the default VM and lab network safely:
-
-```bash
-sudo bash scripts/destroy-lab.sh
-```
-
-The script requires the exact confirmation text:
+Windows writes a success marker at:
 
 ```text
-DELETE-LAB
+C:\ADLab\SUCCESS.txt
 ```
 
-The downloaded Microsoft ISO is intentionally retained so another lab can be rebuilt without downloading it again.
+## Remove the lab
 
-For a custom VM/network name:
-
-```bash
-sudo bash scripts/destroy-lab.sh MY-DC my-lab-network
-```
+The repository includes a safe teardown script that removes the selected VM and lab network without uninstalling KVM/libvirt from the Kali host.
 
 ## Repository layout
 
 ```text
 Kali-AD-Lab/
+├── bootstrap.sh
+├── kali-ad-lab
 ├── setup.sh
 ├── templates/
 │   └── Autounattend.xml.template
@@ -242,7 +191,7 @@ Kali-AD-Lab/
 
 ## Planned community roadmap
 
-- Windows 11 domain-joined client automation
+- Windows client domain-join automation
 - second Domain Controller option
 - configurable users, groups and OUs
 - Group Policy lab scenarios
@@ -254,7 +203,7 @@ Kali-AD-Lab/
 
 ## Important usage note
 
-Use this project only in systems and networks you own or are explicitly authorized to administer and test. Keep training credentials and data separate from production environments.
+Use this project only on systems and networks you own or are explicitly authorized to administer and test. Keep training credentials and data separate from production environments.
 
 ## License
 
