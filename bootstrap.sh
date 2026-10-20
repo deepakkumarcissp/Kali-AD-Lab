@@ -5,7 +5,11 @@ REPO_URL='https://github.com/deepakkumarcissp/Kali-AD-Lab.git'
 INSTALL_DIR='/opt/Kali-AD-Lab'
 
 if [[ ${EUID} -ne 0 ]]; then
-  exec sudo -E bash
+  if [[ -f "$0" ]]; then
+    exec sudo -E bash "$0" "$@"
+  fi
+  printf 'Run this as root, e.g.:\n  curl -fsSL https://raw.githubusercontent.com/deepakkumarcissp/Kali-AD-Lab/main/bootstrap.sh | sudo bash\n' >&2
+  exit 1
 fi
 
 printf '\n============================================================\n'

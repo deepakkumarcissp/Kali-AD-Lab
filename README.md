@@ -319,9 +319,11 @@ Kali-AD-Lab/
 
 The teardown helper removes the selected VM and lab network without uninstalling KVM/libvirt from the Kali host. The cached Microsoft/unattended Windows media is retained so a future lab does not need another multi-gigabyte download/build.
 
-## Before public release
+## Validation status
 
-The installer has been hardened from real deployment troubleshooting, including QEMU permission problems, Windows DVD boot prompts, UEFI boot-order loops, interrupted Windows Setup, fragile setup-phase automation, VM shutoff during setup, and manual AD promotion. Perform one final clean-machine run of the current `main` branch before changing the repository to public so the exact release candidate is validated end-to-end without guest interaction.
+The installer has been iteratively hardened against real deployment issues, including QEMU permission problems, Windows DVD boot prompts, UEFI boot-order loops, interrupted Windows Setup, fragile setup-phase automation, VM shutoff during setup, and manual AD promotion. Automated CI validates script syntax, PowerShell parsing, the unattended XML template, and the presence of every required orchestration stage on every push.
+
+A full end-to-end run (bare Kali host to `LAB READY`) is not exercised by that CI -- it needs nested virtualization, an ~8 GB Windows ISO download, and 60-90 minutes, none of which a hosted runner provides. If a run doesn't complete, check the host-side log under `/var/log/kali-ad-lab/` and the Windows-side log under `C:\ADLab\Logs\`, and open an issue with both attached.
 
 ## Planned community roadmap
 
